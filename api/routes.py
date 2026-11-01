@@ -1,28 +1,34 @@
+
 """
-API route handlers for DocuMatch Architect.
+Secure API route handlers for DocuMatch Architect.
 
 Endpoints:
-    POST /api/contracts/ingest  - Upload and index a contract PDF
-    POST /api/pos/ingest        - Upload, extract, and index a PO PDF
-    POST /api/invoices/process  - Upload, extract, validate an invoice PDF
-    GET  /api/results           - Query stored validation results
-    GET  /api/stats             - Aggregate processing statistics
-    GET  /api/health            - System health check
+    POST /api/contracts/ingest
+    POST /api/pos/ingest
+    POST /api/invoices/process
+    POST /api/batch/process
+    GET  /api/batch/{batch_id}/status
+    POST /api/batch/{batch_id}/cancel
+    GET  /api/results
+    GET  /api/stats
+    POST /api/demo/load
+    GET  /api/export/excel
+    GET  /api/health
 """
 
 import logging
+import re
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
-
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 
 from config import settings
 from core.database import Database
 from core.demo import load_demo_data
 from core.export import export_results_excel
-from core.extraction import ExtractionEngine
 from core.services import BatchService, DocumentService, MatchService
 from core.services.batch_service import BatchFile
 
@@ -32,8 +38,8 @@ from .dependencies import (
     get_document_service,
     get_match_service,
     get_matcher,
-    get_po_store,
     get_vector_store,
+    get_po_store,
 )
 from .schemas import (
     BatchErrorDetail,
@@ -58,6 +64,156 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 
+UPLOAD_CHUNK_SIZE = 1024 * 1024
+
+
+def _display_filename(filename: str | None) -> str:
+    """Return a safe display-only filename."""
+    if not filename:
+        return "uploaded_document.pdf"
+
+    # Handle both Unix and Windows path separators.
+    name = filename.replace("\\", "/").split("/")[-1]
+    name = re.sub(r"[^A-Za-z0-9._ -]", "_", name)
+    name = name.strip(" .")
+
+    return name[:150] or "uploaded_document.pdf"
+
+
+def _save_uploaded_pdf(
+    file: UploadFile,
+    destination_dir: Path,
+) -> tuple[Path, str]:
+    """
+    Save a PDF using a server-generated filename.
+
+    Enforces file size and checks the actual PDF header.
+    The original user filename is returned only for display metadata.
+    """
+    display_name = _display_filename(file.filename)
+
+    if not display_name.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF files are accepted.",
+        )
+
+    max_size = settings.max_file_size_bytes
+
+    destination_dir.mkdir(parents=True, exist_ok=True)
+
+    # Never use the user-provided filename as a storage path.
+    save_path = destination_dir / f"{uuid4().hex}.pdf"
+
+    total_size = 0
+    header = bytearray()
+
+    try:
+        with save_path.open("xb") as output:
+            while True:
+                chunk = file.file.read(UPLOAD_CHUNK_SIZE)
+
+                if not chunk:
+                    break
+
+                total_size += len(chunk)
+
+                if total_size > max_size:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            f"File exceeds the maximum allowed size "
+                            f"of {settings.max_file_size_mb} MB."
+                        ),
+                    )
+
+                if len(header) < 1024:
+                    remaining = 1024 - len(header)
+                    header.extend(chunk[:remaining])
+
+                output.write(chunk)
+
+        # PDF headers normally appear within the first 1024 bytes.
+        if b"%PDF-" not in header:
+            raise HTTPException(
+                status_code=400,
+                detail="The uploaded file does not contain a valid PDF header.",
+            )
+
+        if total_size == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="The uploaded file is empty.",
+            )
+
+        return save_path, display_name
+
+    except HTTPException:
+        save_path.unlink(missing_ok=True)
+        raise
+
+    except OSError:
+        save_path.unlink(missing_ok=True)
+        logger.exception("Failed to save uploaded PDF")
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to save the uploaded document.",
+        )
+
+
+def _validate_batch_file_path(file_path: str) -> Path:
+    """
+    Restrict batch processing to existing PDFs inside the invoices directory.
+    """
+    invoice_root = settings.invoices_path.resolve()
+
+    try:
+        requested_path = Path(file_path).resolve(strict=True)
+        requested_path.relative_to(invoice_root)
+    except (OSError, RuntimeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail="Batch files must be existing files inside the invoices directory.",
+        )
+
+    if not requested_path.is_file():
+        raise HTTPException(
+            status_code=400,
+            detail="Batch file must be a regular file.",
+        )
+
+    if requested_path.suffix.lower() != ".pdf":
+        raise HTTPException(
+            status_code=400,
+            detail="Batch processing accepts PDF files only.",
+        )
+
+    try:
+        if requested_path.stat().st_size > settings.max_file_size_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail="A batch file exceeds the maximum allowed file size.",
+            )
+
+        with requested_path.open("rb") as source:
+            header = source.read(1024)
+
+        if b"%PDF-" not in header:
+            raise HTTPException(
+                status_code=400,
+                detail="A batch file does not contain a valid PDF header.",
+            )
+
+    except HTTPException:
+        raise
+    except OSError:
+        raise HTTPException(
+            status_code=400,
+            detail="Unable to validate a batch file.",
+        )
+
+    return requested_path
+
 
 # ==================== CONTRACTS ====================
 
@@ -66,38 +222,45 @@ router = APIRouter(prefix="/api")
     "/contracts/ingest",
     response_model=ContractIngestResponse,
     summary="Ingest a contract PDF",
-    description="Upload a contract PDF, parse it to markdown, and index it in ChromaDB for semantic search.",
+    description="Upload and index a contract PDF.",
 )
 def ingest_contract(
     file: UploadFile = File(..., description="Contract PDF file"),
     vendor_name: str = Form(..., description="Vendor name"),
-    contract_type: str = Form("MSA", description="Contract type: MSA, SOW, NDA, or Other"),
+    contract_type: str = Form("MSA", description="Contract type"),
     service: DocumentService = Depends(get_document_service),
 ):
-    # Save uploaded file
-    save_path = settings.contracts_path / file.filename
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(save_path, "wb") as f:
-        f.write(file.file.read())
-
-    # Process via service
-    contract_id, result = service.ingest_contract(
-        file_path=str(save_path),
-        vendor_name=vendor_name,
-        contract_type=contract_type,
-        metadata={"filename": file.filename},
+    save_path, display_name = _save_uploaded_pdf(
+        file,
+        settings.contracts_path,
     )
 
-    return ContractIngestResponse(
-        contract_id=contract_id,
-        vendor_name=vendor_name,
-        contract_type=contract_type,
-        parse_info=ParseInfo(
-            page_count=result.page_count,
-            tables_found=result.tables_found,
-            parse_method=result.parse_method,
-        ),
-    )
+    try:
+        contract_id, result = service.ingest_contract(
+            file_path=str(save_path),
+            vendor_name=vendor_name,
+            contract_type=contract_type,
+            metadata={"filename": display_name},
+        )
+
+        return ContractIngestResponse(
+            contract_id=contract_id,
+            vendor_name=vendor_name,
+            contract_type=contract_type,
+            parse_info=ParseInfo(
+                page_count=result.page_count,
+                tables_found=result.tables_found,
+                parse_method=result.parse_method,
+            ),
+        )
+
+    except Exception:
+        save_path.unlink(missing_ok=True)
+        logger.exception("Contract ingestion failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Contract processing failed. Check server logs.",
+        )
 
 
 # ==================== PURCHASE ORDERS ====================
@@ -107,58 +270,61 @@ def ingest_contract(
     "/pos/ingest",
     response_model=POIngestResponse,
     summary="Ingest a Purchase Order PDF",
-    description="Upload a PO PDF, extract structured data via LLM, and index it in ChromaDB.",
+    description="Upload, extract, and index a purchase order PDF.",
 )
 def ingest_po(
     file: UploadFile = File(..., description="Purchase Order PDF file"),
     vendor_name: str = Form(..., description="Vendor name"),
-    model: Optional[str] = Form(None, description="LLM model override (e.g., llama3.2)"),
+    model: str | None = Form(None, description="Model override is disabled"),
     service: DocumentService = Depends(get_document_service),
 ):
-    # Save uploaded file
-    save_path = settings.purchase_orders_path / file.filename
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(save_path, "wb") as f:
-        f.write(file.file.read())
-
-    # Swap extraction engine if model override specified
-    original_engine = None
+    # Do not mutate a shared extraction engine for individual requests.
     if model and model != settings.default_model:
-        original_engine = service.extraction_engine
-        service.extraction_engine = ExtractionEngine(
-            model=model, ollama_host=settings.ollama_host,
+        raise HTTPException(
+            status_code=400,
+            detail="Model overrides are disabled. Use the configured default model.",
         )
+
+    save_path, display_name = _save_uploaded_pdf(
+        file,
+        settings.purchase_orders_path,
+    )
 
     try:
         po, result = service.ingest_po(
             file_path=str(save_path),
             vendor_name=vendor_name,
         )
-    finally:
-        if original_engine:
-            service.extraction_engine = original_engine
 
-    return POIngestResponse(
-        po_number=po.po_number,
-        vendor_name=po.vendor_name,
-        order_date=po.order_date,
-        total_amount=po.total_amount,
-        currency=po.currency,
-        line_items=[
-            LineItemResponse(
-                description=item.description,
-                quantity=item.quantity,
-                unit_price=item.unit_price,
-                total=item.total,
-            )
-            for item in po.line_items
-        ],
-        parse_info=ParseInfo(
-            page_count=result.page_count,
-            tables_found=result.tables_found,
-            parse_method=result.parse_method,
-        ),
-    )
+        return POIngestResponse(
+            po_number=po.po_number,
+            vendor_name=po.vendor_name,
+            order_date=po.order_date,
+            total_amount=po.total_amount,
+            currency=po.currency,
+            line_items=[
+                LineItemResponse(
+                    description=item.description,
+                    quantity=item.quantity,
+                    unit_price=item.unit_price,
+                    total=item.total,
+                )
+                for item in po.line_items
+            ],
+            parse_info=ParseInfo(
+                page_count=result.page_count,
+                tables_found=result.tables_found,
+                parse_method=result.parse_method,
+            ),
+        )
+
+    except Exception:
+        save_path.unlink(missing_ok=True)
+        logger.exception("Purchase order ingestion failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Purchase order processing failed. Check server logs.",
+        )
 
 
 # ==================== INVOICES ====================
@@ -168,91 +334,97 @@ def ingest_po(
     "/invoices/process",
     response_model=InvoiceProcessResponse,
     summary="Process and validate an invoice",
-    description=(
-        "Upload an invoice PDF, extract structured data via LLM, "
-        "and validate against indexed contracts and POs. "
-        "Performs three-way matching if po_number is provided."
-    ),
+    description="Upload an invoice PDF and validate it against indexed records.",
 )
 def process_invoice(
     file: UploadFile = File(..., description="Invoice PDF file"),
-    po_number: Optional[str] = Form(None, description="PO number for three-way matching"),
-    model: Optional[str] = Form(None, description="LLM model override (e.g., llama3.2)"),
+    po_number: str | None = Form(None, description="PO number for three-way matching"),
+    model: str | None = Form(None, description="Model override is disabled"),
     doc_service: DocumentService = Depends(get_document_service),
     match_service: MatchService = Depends(get_match_service),
 ):
-    # Save uploaded file
-    save_path = settings.invoices_path / file.filename
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(save_path, "wb") as f:
-        f.write(file.file.read())
-
-    # Swap extraction engine if model override specified
-    original_engine = None
     if model and model != settings.default_model:
-        original_engine = doc_service.extraction_engine
-        doc_service.extraction_engine = ExtractionEngine(
-            model=model, ollama_host=settings.ollama_host,
+        raise HTTPException(
+            status_code=400,
+            detail="Model overrides are disabled. Use the configured default model.",
         )
+
+    save_path, display_name = _save_uploaded_pdf(
+        file,
+        settings.invoices_path,
+    )
 
     try:
         invoice, parse_result = doc_service.process_invoice(str(save_path))
-    finally:
-        if original_engine:
-            doc_service.extraction_engine = original_engine
 
-    # Validate (three-way if PO provided, two-way otherwise)
-    result = match_service.validate_three_way(invoice, po_number=po_number)
-
-    # Build match detail responses
-    def _match_detail(match) -> Optional[MatchDetailResponse]:
-        if match is None:
-            return None
-        return MatchDetailResponse(
-            match_type=match.match_type,
-            passed=match.passed,
-            score=match.score,
-            issues=[
-                ValidationIssueResponse(
-                    rule=i.rule, severity=i.severity, message=i.message
-                )
-                for i in match.issues
-            ],
+        result = match_service.validate_three_way(
+            invoice,
+            po_number=po_number,
         )
 
-    return InvoiceProcessResponse(
-        invoice_number=invoice.invoice_number,
-        vendor_name=invoice.vendor_name,
-        invoice_date=invoice.invoice_date,
-        total_amount=invoice.total_amount,
-        currency=invoice.currency,
-        line_items=[
-            LineItemResponse(
-                description=item.description,
-                quantity=item.quantity,
-                unit_price=item.unit_price,
-                total=item.total,
+        def _match_detail(match):
+            if match is None:
+                return None
+
+            return MatchDetailResponse(
+                match_type=match.match_type,
+                passed=match.passed,
+                score=match.score,
+                issues=[
+                    ValidationIssueResponse(
+                        rule=issue.rule,
+                        severity=issue.severity,
+                        message=issue.message,
+                    )
+                    for issue in match.issues
+                ],
             )
-            for item in invoice.line_items
-        ],
-        po_number=po_number or invoice.po_number,
-        payment_terms=invoice.payment_terms,
-        validation=ValidationSummary(
-            status=result.status,
-            matches_passed=result.matches_passed,
-            total_matches=result.total_matches,
-            overall_score=result.overall_score,
-            invoice_po_match=_match_detail(result.invoice_po_match),
-            invoice_contract_match=_match_detail(result.invoice_contract_match),
-            po_contract_match=_match_detail(result.po_contract_match),
-            issues=[
-                ValidationIssueResponse(
-                    rule=i.rule, severity=i.severity, message=i.message
+
+        return InvoiceProcessResponse(
+            invoice_number=invoice.invoice_number,
+            vendor_name=invoice.vendor_name,
+            invoice_date=invoice.invoice_date,
+            total_amount=invoice.total_amount,
+            currency=invoice.currency,
+            line_items=[
+                LineItemResponse(
+                    description=item.description,
+                    quantity=item.quantity,
+                    unit_price=item.unit_price,
+                    total=item.total,
                 )
-                for i in result.all_issues
+                for item in invoice.line_items
             ],
-        ),
-    )
+            po_number=po_number or invoice.po_number,
+            payment_terms=invoice.payment_terms,
+            validation=ValidationSummary(
+                status=result.status,
+                matches_passed=result.matches_passed,
+                total_matches=result.total_matches,
+                overall_score=result.overall_score,
+                invoice_po_match=_match_detail(result.invoice_po_match),
+                invoice_contract_match=_match_detail(
+                    result.invoice_contract_match
+                ),
+                po_contract_match=_match_detail(result.po_contract_match),
+                issues=[
+                    ValidationIssueResponse(
+                        rule=issue.rule,
+                        severity=issue.severity,
+                        message=issue.message,
+                    )
+                    for issue in result.all_issues
+                ],
+            ),
+        )
+
+    except Exception:
+        save_path.unlink(missing_ok=True)
+        logger.exception("Invoice processing failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Invoice processing failed. Check server logs.",
+        )
 
 
 # ==================== BATCH PROCESSING ====================
@@ -261,21 +433,36 @@ def process_invoice(
 @router.post(
     "/batch/process",
     response_model=BatchSubmitResponse,
-    summary="Submit a batch of invoices for processing",
-    description=(
-        "Submit multiple invoice files for concurrent processing. "
-        "Returns immediately with a batch ID for status polling via "
-        "GET /api/batch/{batch_id}/status. Max 100 files per batch."
-    ),
+    summary="Submit a batch of invoices",
+    description="Submit up to 100 existing PDF files from the invoices directory.",
 )
 def submit_batch(
     request: BatchSubmitRequest,
     batch_service: BatchService = Depends(get_batch_service),
 ):
-    files = [
-        BatchFile(file_path=f.file_path, po_number=f.po_number)
-        for f in request.files
-    ]
+    if not request.files:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one batch file is required.",
+        )
+
+    if len(request.files) > 100:
+        raise HTTPException(
+            status_code=400,
+            detail="A maximum of 100 files is allowed per batch.",
+        )
+
+    files = []
+
+    for item in request.files:
+        safe_path = _validate_batch_file_path(item.file_path)
+
+        files.append(
+            BatchFile(
+                file_path=str(safe_path),
+                po_number=item.po_number,
+            )
+        )
 
     batch_id = batch_service.submit_batch(files)
 
@@ -290,16 +477,18 @@ def submit_batch(
     "/batch/{batch_id}/status",
     response_model=BatchStatusResponse,
     summary="Check batch processing status",
-    description="Poll this endpoint to track progress of a submitted batch.",
 )
 def get_batch_status(
     batch_id: int,
     batch_service: BatchService = Depends(get_batch_service),
 ):
+    if batch_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid batch ID.")
+
     status = batch_service.get_batch_status(batch_id)
+
     if status is None:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail=f"Batch {batch_id} not found")
+        raise HTTPException(status_code=404, detail="Batch not found.")
 
     return BatchStatusResponse(
         job_id=status.job_id,
@@ -320,20 +509,20 @@ def get_batch_status(
 @router.post(
     "/batch/{batch_id}/cancel",
     summary="Cancel a running batch",
-    description="Signal cancellation for a running batch. Already-processing files will complete.",
 )
 def cancel_batch(
     batch_id: int,
     batch_service: BatchService = Depends(get_batch_service),
 ):
-    cancelled = batch_service.cancel_batch(batch_id)
-    if cancelled:
-        return {"message": f"Batch {batch_id} cancellation requested"}
+    if batch_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid batch ID.")
 
-    from fastapi import HTTPException
+    if batch_service.cancel_batch(batch_id):
+        return {"message": "Batch cancellation requested."}
+
     raise HTTPException(
         status_code=404,
-        detail=f"Batch {batch_id} not found or already finished",
+        detail="Batch not found or already finished.",
     )
 
 
@@ -344,13 +533,12 @@ def cancel_batch(
     "/results",
     response_model=list[ResultResponse],
     summary="Query validation results",
-    description="Retrieve stored validation results with optional filters by vendor, status, or job.",
 )
 def get_results(
-    vendor_name: Optional[str] = Query(None, description="Filter by vendor name"),
-    status: Optional[str] = Query(None, description="Filter by status: PASS, FAIL, or REVIEW"),
-    job_id: Optional[int] = Query(None, description="Filter by job ID"),
-    limit: int = Query(50, ge=1, le=500, description="Max results to return"),
+    vendor_name: str | None = Query(None),
+    status: str | None = Query(None),
+    job_id: int | None = Query(None, ge=1),
+    limit: int = Query(50, ge=1, le=500),
     db: Database = Depends(get_database),
 ):
     results = db.get_results(
@@ -377,15 +565,15 @@ def get_results(
     ]
 
 
+# ==================== STATISTICS ====================
+
+
 @router.get(
     "/stats",
     response_model=StatsResponse,
     summary="Processing statistics",
-    description="Get aggregate statistics: total jobs, pass/fail rates, pending counts.",
 )
-def get_stats(
-    db: Database = Depends(get_database),
-):
+def get_stats(db: Database = Depends(get_database)):
     return StatsResponse(**db.get_stats())
 
 
@@ -394,23 +582,14 @@ def get_stats(
 
 @router.post(
     "/demo/load",
-    summary="Load sample data for demo",
-    description=(
-        "Load 3 curated scenarios (PASS, FAIL, FAIL) into the system. "
-        "Indexes sample contracts and POs, processes sample invoices, "
-        "and saves results to the database. No Ollama required."
-    ),
+    summary="Load sample demo data",
 )
-def load_demo(
-    db: Database = Depends(get_database),
-):
-    from core.matcher import Matcher as MatcherClass
-    vs = get_vector_store()
-    ps = get_po_store()
-    m = get_matcher()
-
+def load_demo(db: Database = Depends(get_database)):
     summary = load_demo_data(
-        vector_store=vs, po_store=ps, matcher=m, database=db,
+        vector_store=get_vector_store(),
+        po_store=get_po_store(),
+        matcher=get_matcher(),
+        database=db,
     )
 
     return {
@@ -428,22 +607,31 @@ def load_demo(
 @router.get(
     "/export/excel",
     summary="Export results as Excel",
-    description="Download validation results as an Excel file with summary and details sheets.",
 )
 def export_excel(
-    vendor_name: Optional[str] = Query(None, description="Filter by vendor"),
-    status: Optional[str] = Query(None, description="Filter by status"),
+    vendor_name: str | None = Query(None),
+    status: str | None = Query(None),
     db: Database = Depends(get_database),
 ):
     excel_bytes = export_results_excel(
-        database=db, vendor_name=vendor_name, status=status,
+        database=db,
+        vendor_name=vendor_name,
+        status=status,
     )
 
-    filename = f"documatch_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    filename = (
+        f"documatch_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    )
+
     return Response(
         content=excel_bytes,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
+        media_type=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        },
     )
 
 
@@ -454,44 +642,58 @@ def export_excel(
     "/health",
     response_model=HealthResponse,
     summary="System health check",
-    description="Check the status of all system components: parser, LLM (Ollama), and vector store (ChromaDB).",
 )
 def health_check(
     doc_service: DocumentService = Depends(get_document_service),
 ):
     components = {}
 
-    # Parser (always available)
     parser = doc_service.parser
     parser_name = "Docling" if parser._docling_available else "pdfplumber"
-    components["parser"] = ComponentHealth(status="ok", detail=parser_name)
 
-    # Ollama LLM
-    engine = doc_service.extraction_engine
-    ollama_ok, ollama_msg = engine.check_connection()
-    components["ollama"] = ComponentHealth(
-        status="ok" if ollama_ok else "error",
-        detail=ollama_msg,
+    components["parser"] = ComponentHealth(
+        status="ok",
+        detail=parser_name,
     )
 
-    # ChromaDB (try to get stats)
+    engine = doc_service.extraction_engine
+
+    try:
+        ollama_ok, _ = engine.check_connection()
+        components["ollama"] = ComponentHealth(
+            status="ok" if ollama_ok else "error",
+            detail="Connected" if ollama_ok else "Unavailable",
+        )
+    except Exception:
+        logger.exception("Ollama health check failed")
+        components["ollama"] = ComponentHealth(
+            status="error",
+            detail="Health check failed",
+        )
+
     try:
         doc_service.vector_store.get_stats()
-        components["chromadb"] = ComponentHealth(status="ok", detail="Connected")
-    except Exception as e:
-        components["chromadb"] = ComponentHealth(status="error", detail=str(e))
+        components["chromadb"] = ComponentHealth(
+            status="ok",
+            detail="Connected",
+        )
+    except Exception:
+        logger.exception("ChromaDB health check failed")
+        components["chromadb"] = ComponentHealth(
+            status="error",
+            detail="Health check failed",
+        )
 
-    # Overall status
-    statuses = [c.status for c in components.values()]
-    if all(s == "ok" for s in statuses):
+    statuses = [component.status for component in components.values()]
+
+    if all(status == "ok" for status in statuses):
         overall = "healthy"
-    elif any(s == "error" for s in statuses):
-        # Degraded if parser works but other things don't
-        if components["parser"].status == "ok":
-            overall = "degraded"
-        else:
-            overall = "unhealthy"
-    else:
+    elif components["parser"].status == "ok":
         overall = "degraded"
+    else:
+        overall = "unhealthy"
 
-    return HealthResponse(status=overall, components=components)
+    return HealthResponse(
+        status=overall,
+        components=components,
+    )
