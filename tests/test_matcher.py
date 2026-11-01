@@ -298,7 +298,7 @@ class TestLineItemValidation:
             total_amount=200,
             currency="USD",
             line_items=[
-                __import__("core.models", fromlist=["LineItem"]).LineItem(
+                LineItem(
                     description="Consulting", quantity=1, unit_price=100, total=100
                 ),
                 __import__("core.models", fromlist=["LineItem"]).LineItem(
