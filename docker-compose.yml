@@ -30,6 +30,7 @@ services:
       - OLLAMA_HOST=http://ollama:11434
       - CHROMA_PERSIST_DIR=/app/data/chroma_db
       - DB_PATH=/app/data/documatch.db
+      - API_AUTH_TOKEN=${API_AUTH_TOKEN:-}
     depends_on:
       - ollama
     restart: unless-stopped
