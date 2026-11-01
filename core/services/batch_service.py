@@ -147,6 +147,7 @@ class BatchService:
                 job_type="invoice_process",
                 file_name=batch_file.file_path,
                 vendor_name=None,  # Will be extracted
+                parent_job_id=parent_id,
             )
             child_ids.append((child_job.id, batch_file))
 
@@ -206,6 +207,15 @@ class BatchService:
                     f"Batch {parent_id}: unexpected error for "
                     f"{batch_file.file_path}: {e}"
                 )
+
+        # Mark queued children that were never submitted as cancelled.
+        if cancel_event.is_set():
+            for child_id, _ in child_ids:
+                child = self.database.get_job(child_id)
+                if child and child.status == "PENDING":
+                    self.database.update_job_status(
+                        child_id, "FAILED", error="Cancelled"
+                    )
 
         # Finalize parent job
         if cancel_event.is_set():
@@ -316,30 +326,19 @@ class BatchService:
         if not parent or parent.type != "batch_process":
             return None
 
-        # Get all child jobs for this batch
-        # Child jobs are invoice_process jobs created right after the batch job
+        # Parent-child linkage prevents unrelated concurrent jobs from
+        # being included in this batch's progress or error report.
         with self.database.session() as session:
             from ..database import Job
-            children = (
+            batch_children = (
                 session.query(Job)
                 .filter(
                     Job.type == "invoice_process",
-                    Job.id > batch_id,
+                    Job.parent_job_id == batch_id,
                 )
                 .order_by(Job.id)
                 .all()
             )
-
-            # Find children that belong to this batch
-            # (created between this batch and the next batch or end)
-            next_batch = (
-                session.query(Job)
-                .filter(Job.type == "batch_process", Job.id > batch_id)
-                .order_by(Job.id)
-                .first()
-            )
-            max_child_id = next_batch.id if next_batch else float("inf")
-            batch_children = [c for c in children if c.id < max_child_id]
 
         total = len(batch_children)
         completed = sum(1 for c in batch_children if c.status == "COMPLETE")
