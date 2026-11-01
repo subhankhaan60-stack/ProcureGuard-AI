@@ -223,9 +223,10 @@ class TestBatchStatus:
         db.update_job_status(parent.id, "PARSING")
 
         # Create child jobs
-        child1 = db.create_job(job_type="invoice_process", file_name="inv1.pdf")
-        child2 = db.create_job(job_type="invoice_process", file_name="inv2.pdf")
-        child3 = db.create_job(job_type="invoice_process", file_name="inv3.pdf")
+        child1 = db.create_job(job_type="invoice_process", file_name="inv1.pdf", parent_job_id=parent.id)
+        unrelated = db.create_job(job_type="invoice_process", file_name="unrelated.pdf")
+        child2 = db.create_job(job_type="invoice_process", file_name="inv2.pdf", parent_job_id=parent.id)
+        child3 = db.create_job(job_type="invoice_process", file_name="inv3.pdf", parent_job_id=parent.id)
 
         # Simulate progress
         db.update_job_status(child1.id, "COMPLETE")
@@ -241,14 +242,15 @@ class TestBatchStatus:
         assert status.processing == 0
         assert len(status.errors) == 1
         assert status.errors[0]["error"] == "Parse error"
+        assert unrelated.status == "PENDING"
 
     def test_status_with_processing_jobs(self, batch_service, db):
         """Jobs in intermediate states count as processing."""
         parent = db.create_job(job_type="batch_process", file_name="2 files")
         db.update_job_status(parent.id, "PARSING")
 
-        child1 = db.create_job(job_type="invoice_process", file_name="inv1.pdf")
-        child2 = db.create_job(job_type="invoice_process", file_name="inv2.pdf")
+        child1 = db.create_job(job_type="invoice_process", file_name="inv1.pdf", parent_job_id=parent.id)
+        child2 = db.create_job(job_type="invoice_process", file_name="inv2.pdf", parent_job_id=parent.id)
 
         db.update_job_status(child1.id, "EXTRACTING")  # In progress
         # child2 stays PENDING
