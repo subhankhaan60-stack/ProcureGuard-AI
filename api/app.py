@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from core.exceptions import StoreError
 from core.extraction import ExtractionError
 from core.services import DocumentProcessingError
+from config import settings
 
 from .routes import router
 from .schemas import ErrorResponse
@@ -36,17 +37,18 @@ app = FastAPI(
         "Supports three-way matching: Invoice <-> PO <-> Contract."
     ),
     version="2.1.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url="/docs" if settings.api_docs_enabled else None,
+    redoc_url="/redoc" if settings.api_docs_enabled else None,
+    openapi_url="/openapi.json" if settings.api_docs_enabled else None,
 )
 
 # CORS middleware (allow all origins for development)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=settings.cors_allowed_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 # Include routes
