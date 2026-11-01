@@ -287,6 +287,45 @@ class TestLineItemValidation:
         assert any(issue.rule == "currency_match" for issue in result.issues)
 
 
+
+    def test_duplicate_invoice_lines_cannot_reuse_one_po_line(self, matcher):
+        from core.models import PurchaseOrderSchema
+
+        invoice = InvoiceSchema(
+            vendor_name="Acme Corp",
+            invoice_number="INV-DUP",
+            invoice_date="2024-01-15",
+            total_amount=200,
+            currency="USD",
+            line_items=[
+                __import__("core.models", fromlist=["LineItem"]).LineItem(
+                    description="Consulting", quantity=1, unit_price=100, total=100
+                ),
+                __import__("core.models", fromlist=["LineItem"]).LineItem(
+                    description="Consulting", quantity=1, unit_price=100, total=100
+                ),
+            ],
+        )
+        po = PurchaseOrderSchema(
+            po_number="PO-DUP",
+            vendor_name="Acme Corp",
+            order_date="2024-01-10",
+            total_amount=100,
+            currency="USD",
+            line_items=[
+                __import__("core.models", fromlist=["LineItem"]).LineItem(
+                    description="Consulting", quantity=1, unit_price=100, total=100
+                ),
+            ],
+        )
+
+        issues = matcher._compare_line_items(
+            invoice.line_items, po.line_items, "invoice_po"
+        )
+
+        assert sum(issue.rule == "line_item_not_found" for issue in issues) == 1
+
+
 class TestDateParsing:
     """Test cases for date parsing."""
 
