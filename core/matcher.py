@@ -875,61 +875,68 @@ class Matcher:
         po_items: List,
         match_type: str,
     ) -> List[ValidationIssue]:
-        """Compare line items between invoice and PO."""
+        """Compare invoice lines to distinct PO lines (one-to-one matching)."""
         issues = []
 
         if not invoice_items or not po_items:
             return issues
 
-        # Build lookup of PO items by description
-        po_lookup = {}
-        for item in po_items:
-            key = item.description.lower().strip()
-            po_lookup[key] = item
+        used_po_indices = set()
 
-        # Check each invoice item
         for inv_item in invoice_items:
             inv_key = inv_item.description.lower().strip()
+            matched_index = None
 
-            # Try to find matching PO item
-            matched = False
-            for po_key, po_item in po_lookup.items():
+            # A PO line can only satisfy one invoice line. This prevents
+            # duplicate invoice descriptions from reusing the same PO line.
+            for index, po_item in enumerate(po_items):
+                if index in used_po_indices:
+                    continue
+                po_key = po_item.description.lower().strip()
                 if self._fuzzy_match(inv_key, po_key):
-                    matched = True
-
-                    # Check quantity
-                    if abs(inv_item.quantity - po_item.quantity) > 0.01:
-                        issues.append(ValidationIssue(
-                            rule="line_qty_match",
-                            severity="error",
-                            message=f"Quantity mismatch for '{inv_item.description}': Invoice={inv_item.quantity}, PO={po_item.quantity}",
-                            invoice_value=inv_item.quantity,
-                            contract_value=po_item.quantity,
-                            match_type=match_type
-                        ))
-
-                    # Check unit price
-                    price_diff = abs(inv_item.unit_price - po_item.unit_price)
-                    max_price = max(inv_item.unit_price, po_item.unit_price)
-                    tolerance = max_price * self.match_tolerance if max_price > 0 else 0.01
-                    if price_diff > tolerance:
-                        issues.append(ValidationIssue(
-                            rule="line_price_match",
-                            severity="error",
-                            message=f"Price mismatch for '{inv_item.description}': Invoice=${inv_item.unit_price:.2f}, PO=${po_item.unit_price:.2f}",
-                            invoice_value=inv_item.unit_price,
-                            contract_value=po_item.unit_price,
-                            match_type=match_type
-                        ))
+                    matched_index = index
                     break
 
-            if not matched and len(po_items) > 0:
+            if matched_index is None:
                 issues.append(ValidationIssue(
                     rule="line_item_not_found",
                     severity="warning",
-                    message=f"Invoice item '{inv_item.description}' not found in PO",
+                    message=f"Invoice item '{inv_item.description}' has no unused matching PO line",
                     invoice_value=inv_item.description,
                     contract_value=None,
+                    match_type=match_type
+                ))
+                continue
+
+            used_po_indices.add(matched_index)
+            po_item = po_items[matched_index]
+
+            if abs(inv_item.quantity - po_item.quantity) > 0.01:
+                issues.append(ValidationIssue(
+                    rule="line_qty_match",
+                    severity="error",
+                    message=(
+                        f"Quantity mismatch for '{inv_item.description}': "
+                        f"Invoice={inv_item.quantity}, PO={po_item.quantity}"
+                    ),
+                    invoice_value=inv_item.quantity,
+                    contract_value=po_item.quantity,
+                    match_type=match_type
+                ))
+
+            price_diff = abs(inv_item.unit_price - po_item.unit_price)
+            max_price = max(inv_item.unit_price, po_item.unit_price)
+            tolerance = max_price * self.match_tolerance if max_price > 0 else 0.01
+            if price_diff > tolerance:
+                issues.append(ValidationIssue(
+                    rule="line_price_match",
+                    severity="error",
+                    message=(
+                        f"Price mismatch for '{inv_item.description}': "
+                        f"Invoice=${inv_item.unit_price:.2f}, PO=${po_item.unit_price:.2f}"
+                    ),
+                    invoice_value=inv_item.unit_price,
+                    contract_value=po_item.unit_price,
                     match_type=match_type
                 ))
 
