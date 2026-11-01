@@ -47,6 +47,7 @@ from .dependencies import (
     get_matcher,
     get_vector_store,
     get_po_store,
+    require_api_key,
 )
 from .schemas import (
     BatchErrorDetail,
@@ -69,7 +70,7 @@ from .schemas import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api", dependencies=[Depends(require_api_key)])
 
 UPLOAD_CHUNK_SIZE = 1024 * 1024
 
