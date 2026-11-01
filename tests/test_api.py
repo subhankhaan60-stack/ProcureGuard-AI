@@ -31,6 +31,7 @@ from core.models import (
     ValidationIssue,
 )
 from core.services import DocumentProcessingError
+from config import settings
 
 
 # ==================== FIXTURES ====================
@@ -441,7 +442,7 @@ class TestHealthCheck:
         data = response.json()
         assert data["status"] == "degraded"
         assert data["components"]["chromadb"]["status"] == "error"
-        assert "Connection refused" in data["components"]["chromadb"]["detail"]
+        assert data["components"]["chromadb"]["detail"] == "Health check failed"
 
     def test_pdfplumber_fallback(self, client, mock_doc_service):
         mock_doc_service.parser._docling_available = False
@@ -458,15 +459,21 @@ class TestHealthCheck:
 class TestBatchAPI:
     """Tests for batch processing API endpoints."""
 
-    def test_submit_batch(self, client, mock_batch_service):
+    def test_submit_batch(self, client, mock_batch_service, tmp_path, monkeypatch):
         mock_batch_service.submit_batch.return_value = 42
+        monkeypatch.setattr(settings, "invoices_dir", str(tmp_path))
+
+        invoice_one = tmp_path / "inv1.pdf"
+        invoice_two = tmp_path / "inv2.pdf"
+        invoice_one.write_bytes(b"%PDF-1.4 fake content")
+        invoice_two.write_bytes(b"%PDF-1.4 fake content")
 
         response = client.post(
             "/api/batch/process",
             json={
                 "files": [
-                    {"file_path": "/tmp/inv1.pdf", "po_number": "PO-001"},
-                    {"file_path": "/tmp/inv2.pdf"},
+                    {"file_path": str(invoice_one), "po_number": "PO-001"},
+                    {"file_path": str(invoice_two)},
                 ]
             },
         )
