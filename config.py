@@ -55,6 +55,7 @@ class Settings(BaseSettings):
         "http://localhost:8501",
     ]
     api_docs_enabled: bool = True
+    api_auth_token: Optional[str] = None
 
     # Three-Way Matching Configuration
     match_tolerance: float = 0.01  # 1% tolerance for amount comparisons
