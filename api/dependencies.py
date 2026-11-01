@@ -6,6 +6,9 @@ Uses functools.lru_cache for singleton behavior.
 """
 
 from functools import lru_cache
+import hmac
+
+from fastapi import Header, HTTPException, status
 
 from config import settings
 from core.database import Database
@@ -15,6 +18,25 @@ from core.parser_engine import ParserEngine
 from core.po_store import POStore
 from core.services import BatchService, DocumentService, MatchService
 from core.vector_store import VectorStore
+
+
+def require_api_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> None:
+    """Require the configured shared API key before accessing API routes.
+
+    This is a deployment-level access gate, not user identity or tenant isolation.
+    """
+    expected = settings.api_auth_token
+    if not expected:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="API authentication is not configured. Set API_AUTH_TOKEN before use.",
+        )
+    if not x_api_key or not hmac.compare_digest(x_api_key, expected):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="A valid X-API-Key header is required.",
+            headers={"WWW-Authenticate": "ApiKey"},
+        )
 
 
 @lru_cache
