@@ -598,6 +598,40 @@ class Matcher:
         issues = []
         score = 1.0
 
+        # Verify that the invoice and PO belong to the same vendor.
+        invoice_vendor = normalize_vendor_name(invoice.vendor_name).casefold()
+        po_vendor = normalize_vendor_name(po.vendor_name).casefold()
+        if invoice_vendor != po_vendor:
+            issues.append(ValidationIssue(
+                rule="vendor_match",
+                severity="critical",
+                message=(
+                    f"Invoice vendor '{invoice.vendor_name}' does not match "
+                    f"PO vendor '{po.vendor_name}'"
+                ),
+                invoice_value=invoice.vendor_name,
+                contract_value=po.vendor_name,
+                match_type="invoice_po"
+            ))
+            score -= 0.3
+
+        # Currency must match before comparing monetary values.
+        invoice_currency = invoice.currency.strip().upper()
+        po_currency = po.currency.strip().upper()
+        if invoice_currency != po_currency:
+            issues.append(ValidationIssue(
+                rule="currency_match",
+                severity="critical",
+                message=(
+                    f"Invoice currency '{invoice_currency}' does not match "
+                    f"PO currency '{po_currency}'"
+                ),
+                invoice_value=invoice_currency,
+                contract_value=po_currency,
+                match_type="invoice_po"
+            ))
+            score -= 0.3
+
         # Check PO number
         if invoice.po_number and invoice.po_number != po.po_number:
             issues.append(ValidationIssue(
@@ -630,15 +664,13 @@ class Matcher:
         issues.extend(line_issues)
         score -= len(line_issues) * 0.1
 
-        # Determine if match passed
-        # Invoice↔PO match requires NO critical issues AND NO error issues with significant mismatches
-        has_critical = any(i.severity == "critical" for i in issues)
-        has_total_mismatch = any(i.rule == "total_match" for i in issues)
-        has_qty_or_price_errors = any(i.rule in ("line_qty_match", "line_price_match") for i in issues)
-
-        # Stricter: fail if there's a total mismatch or both qty and price errors
-        significant_errors = has_total_mismatch and has_qty_or_price_errors
-        passed = not has_critical and not significant_errors and score >= 0.6
+        # A match cannot pass when any discrepancy or warning remains.
+        # In particular, a total-only or line-only mismatch must not be ignored.
+        blocking_issues = any(
+            issue.severity in ("critical", "error", "warning")
+            for issue in issues
+        )
+        passed = not blocking_issues and score >= 0.6
 
         return MatchDetail(
             match_type="invoice_po",
