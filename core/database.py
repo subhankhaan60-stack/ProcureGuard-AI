@@ -70,6 +70,7 @@ class Job(Base):
     status = Column(String(20), nullable=False, default="PENDING")
     file_name = Column(String(255), nullable=True)
     vendor_name = Column(String(255), nullable=True)
+    parent_job_id = Column(Integer, ForeignKey("jobs.id"), nullable=True, index=True)
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     completed_at = Column(DateTime, nullable=True)
     error = Column(Text, nullable=True)
@@ -186,6 +187,13 @@ class Database:
         # Create tables
         Base.metadata.create_all(self.engine)
 
+        # Upgrade databases created before batch parent-child links existed.
+        with self.engine.begin() as connection:
+            columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(jobs)").fetchall()}
+            if "parent_job_id" not in columns:
+                connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN parent_job_id INTEGER REFERENCES jobs(id)")
+                connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_jobs_parent_job_id ON jobs(parent_job_id)")
+
         logger.info(f"Database initialized at {db_path} (WAL mode)")
 
     def session(self) -> Session:
@@ -199,14 +207,16 @@ class Database:
         job_type: str,
         file_name: Optional[str] = None,
         vendor_name: Optional[str] = None,
+        parent_job_id: Optional[int] = None,
     ) -> Job:
-        """Create a new processing job."""
+        """Create a new processing job, optionally linked to a batch parent."""
         with self.session() as session:
             job = Job(
                 type=job_type,
                 status="PENDING",
                 file_name=file_name,
                 vendor_name=vendor_name,
+                parent_job_id=parent_job_id,
             )
             session.add(job)
             session.commit()
@@ -216,6 +226,7 @@ class Database:
             # Audit log
             self._audit(session, "job_created", "job", str(job_id), {
                 "type": job_type, "file_name": file_name,
+                "parent_job_id": parent_job_id,
             })
             session.commit()
 
