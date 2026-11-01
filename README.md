@@ -100,6 +100,24 @@ uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload
 
 Full OpenAPI docs at `http://localhost:8000/docs` when running.
 
+### API access protection
+
+All `/api/*` endpoints require the shared `X-API-Key` header. Configure `API_AUTH_TOKEN` in your `.env` file before using the API. Generate a strong secret locally with:
+
+```bash
+openssl rand -hex 32
+```
+
+Do not commit the generated secret or share it in screenshots/logs. Docker Compose passes `API_AUTH_TOKEN` from the host environment into the API container. If the token is not configured, API routes fail closed with HTTP 503; missing or incorrect keys receive HTTP 401.
+
+This is a single shared deployment key, **not** individual user accounts, roles, or company-level data isolation. Do not treat it as multi-tenant SaaS authentication.
+
+Example:
+
+```bash
+curl -H "X-API-Key: $API_AUTH_TOKEN" http://localhost:8000/api/stats
+```
+
 ```bash
 # Ingest a contract
 curl -X POST http://localhost:8000/api/contracts/ingest \
