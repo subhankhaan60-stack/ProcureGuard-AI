@@ -65,13 +65,14 @@ def mock_database():
 
 
 @pytest.fixture
-def client(mock_doc_service, mock_match_service, mock_batch_service, mock_database):
+def client(mock_doc_service, mock_match_service, mock_batch_service, mock_database, monkeypatch):
     """TestClient with mocked dependencies."""
+    monkeypatch.setattr(settings, "api_auth_token", "test-secret")
     app.dependency_overrides[get_document_service] = lambda: mock_doc_service
     app.dependency_overrides[get_match_service] = lambda: mock_match_service
     app.dependency_overrides[get_batch_service] = lambda: mock_batch_service
     app.dependency_overrides[get_database] = lambda: mock_database
-    yield TestClient(app)
+    yield TestClient(app, headers={"X-API-Key": "test-secret"})
     app.dependency_overrides.clear()
 
 
@@ -156,6 +157,24 @@ def sample_three_way_result():
         ],
         matched_clauses=[],
     )
+
+
+# ==================== API AUTHENTICATION ====================
+
+class TestAPIAuthentication:
+    def test_rejects_missing_api_key(self, client):
+        response = client.get("/api/stats", headers={})
+        assert response.status_code == 401
+
+    def test_rejects_invalid_api_key(self, client):
+        response = client.get("/api/stats", headers={"X-API-Key": "wrong-secret"})
+        assert response.status_code == 401
+
+    def test_rejects_requests_when_server_secret_is_not_configured(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "api_auth_token", None)
+        response = client.get("/api/stats")
+        assert response.status_code == 503
+        assert "API_AUTH_TOKEN" in response.json()["detail"]
 
 
 # ==================== CONTRACT INGESTION ====================
