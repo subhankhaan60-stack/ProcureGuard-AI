@@ -410,6 +410,30 @@ class TestInvoiceProcess:
 class TestHealthCheck:
     """Tests for GET /api/health."""
 
+    def test_cors_allows_configured_local_origin(self, client):
+        response = client.options(
+            "/api/health",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+        assert response.headers["access-control-allow-credentials"] == "false"
+
+    def test_cors_rejects_unconfigured_origin(self, client):
+        response = client.options(
+            "/api/health",
+            headers={
+                "Origin": "https://untrusted.example",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+        assert "access-control-allow-origin" not in response.headers
+
     def test_healthy(self, client, mock_doc_service):
         response = client.get("/api/health")
 
