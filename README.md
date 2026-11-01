@@ -1,4 +1,5 @@
-# DocuMatch Architect
+# ProcureGuard AI
+Enterprise Procurement Intelligence Platform
 
 [![CI](https://github.com/spalit2025/DocuMatch/actions/workflows/ci.yml/badge.svg)](https://github.com/spalit2025/DocuMatch/actions/workflows/ci.yml)
 
