@@ -163,7 +163,7 @@ def sample_three_way_result():
 
 class TestAPIAuthentication:
     def test_rejects_missing_api_key(self, client):
-        response = client.get("/api/stats", headers={})
+        response = client.get("/api/stats", headers={"X-API-Key": ""})
         assert response.status_code == 401
 
     def test_rejects_invalid_api_key(self, client):
