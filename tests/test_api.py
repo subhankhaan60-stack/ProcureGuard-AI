@@ -435,11 +435,13 @@ class TestHealthCheck:
             headers={
                 "Origin": "http://localhost:3000",
                 "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "content-type,x-api-key",
             },
         )
 
         assert response.status_code == 200
         assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+        assert "x-api-key" in response.headers["access-control-allow-headers"].lower()
         assert "access-control-allow-credentials" not in response.headers
 
     def test_cors_rejects_unconfigured_origin(self, client):
