@@ -145,6 +145,15 @@ curl "http://localhost:8000/api/results?status=FAIL&vendor_name=Acme"
 curl http://localhost:8000/api/health
 ```
 
+## Human Review Gate
+
+Every extracted invoice and purchase order starts with `human_review_status: PENDING`.
+Extraction and matching results are decision support only; they do not constitute
+human approval or authorization to pay. A qualified reviewer must compare critical
+values against the original document before approval. The current schema records
+the pending state; reviewer identity, approval actions, immutable decision history,
+and field-level page citations are not yet implemented.
+
 ## Evaluation Results
 
 The matching engine is evaluated against 12 synthetic scenarios covering exact matches, partial matches, and full mismatches. Run `python evals/run_evaluation.py` to reproduce.
