@@ -51,6 +51,17 @@ class TestParserEngine:
         finally:
             Path(temp_path).unlink()
 
+    def test_rejects_file_with_pdf_extension_but_invalid_content(self, tmp_path):
+        parser = ParserEngine()
+        invalid_pdf = tmp_path / "not_really_a_pdf.pdf"
+        invalid_pdf.write_bytes(b"This is not a PDF document")
+
+        result = parser.parse_to_markdown(str(invalid_pdf))
+
+        assert result.success is False
+        assert "pdf header not found" in result.error_message.lower()
+        assert result.markdown == ""
+
     def test_parse_result_model(self):
         """Test ParseResult model creation."""
         result = ParseResult(
