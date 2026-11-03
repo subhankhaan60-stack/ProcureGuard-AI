@@ -87,6 +87,33 @@ class ParserEngine:
                 file_path=str(path)
             )
 
+        # Reject files that only have a .pdf extension but are not PDF documents.
+        # The PDF specification permits the header to appear within the first 1024 bytes.
+        try:
+            with path.open("rb") as source:
+                header = source.read(1024)
+        except OSError as exc:
+            return ParseResult(
+                markdown="",
+                page_count=0,
+                tables_found=0,
+                parse_method="docling",
+                success=False,
+                error_message=f"Unable to read PDF file: {exc}",
+                file_path=str(path)
+            )
+
+        if b"%PDF-" not in header:
+            return ParseResult(
+                markdown="",
+                page_count=0,
+                tables_found=0,
+                parse_method="docling",
+                success=False,
+                error_message="Invalid PDF file: PDF header not found.",
+                file_path=str(path)
+            )
+
         # Enforce max file size to prevent MemoryError
         file_size = path.stat().st_size
         if file_size > settings.max_file_size_bytes:
