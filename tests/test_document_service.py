@@ -58,7 +58,7 @@ def mock_extraction_engine():
     )
     engine.extract_po_data.return_value = PurchaseOrderSchema(
         po_number="PO-001",
-        vendor_name="Extracted Vendor",
+        vendor_name="Acme Corp",
         order_date="2024-01-10",
         total_amount=5000.00,
         line_items=[
@@ -176,6 +176,8 @@ class TestIngestPO:
         self, service, mock_extraction_engine, mock_po_store, tmp_pdf
     ):
         """Caller input must not hide a vendor mismatch in the source PO."""
+        mock_extraction_engine.extract_po_data.return_value.vendor_name = "Extracted Vendor"
+
         with pytest.raises(DocumentProcessingError, match="does not match"):
             service.ingest_po(tmp_pdf, vendor_name="Override Vendor")
 
