@@ -206,7 +206,7 @@ class TestIngestPO:
         mock_po_store.index_po.side_effect = StoreError("ChromaDB connection lost")
 
         with pytest.raises(StoreError, match="ChromaDB connection lost"):
-            service.ingest_po(tmp_pdf, "Acme")
+            service.ingest_po(tmp_pdf, "Acme Corp")
 
 
 # ==================== PROCESS INVOICE ====================
