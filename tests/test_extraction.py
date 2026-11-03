@@ -180,6 +180,7 @@ class TestInvoiceValidation:
 
         assert invoice.vendor_name == "Test Vendor"
         assert invoice.currency == "PKR"
+        assert invoice.human_review_status == "PENDING"
         assert invoice.line_items == []
 
     def test_validate_with_missing_critical_fields_fails(self, engine):
@@ -200,6 +201,19 @@ class TestInvoiceValidation:
 
         with pytest.raises(ExtractionError, match="vendor_name"):
             engine._validate_invoice(incomplete_data)
+
+    def test_purchase_order_starts_pending_human_review(self, engine):
+        data = {
+            "po_number": "PO-001",
+            "vendor_name": "Test Vendor",
+            "order_date": "2024-01-01",
+            "total_amount": 500,
+            "currency": "PKR",
+        }
+
+        purchase_order = engine._validate_po(data)
+
+        assert purchase_order.human_review_status == "PENDING"
 
     def test_validate_rejects_missing_currency(self, engine):
         data = {
