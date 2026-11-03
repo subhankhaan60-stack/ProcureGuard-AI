@@ -338,19 +338,48 @@ class ExtractionEngine:
 
     @staticmethod
     def _parse_line_items(data: dict) -> list[LineItem]:
-        """Parse line items from extracted data dict."""
-        line_items = []
+        """Parse supplied line items without inventing missing values."""
         raw_items = data.get("line_items", [])
+        if raw_items is None:
+            return []
+        if not isinstance(raw_items, list):
+            raise ExtractionError("Invalid line_items: expected a list")
 
-        if isinstance(raw_items, list):
-            for item in raw_items:
-                if isinstance(item, dict):
-                    line_items.append(LineItem(
-                        description=str(item.get("description", "Unknown")),
-                        quantity=float(item.get("quantity", 1)),
-                        unit_price=float(item.get("unit_price", 0)),
-                        total=float(item.get("total", 0)),
-                    ))
+        line_items = []
+        required_fields = ("description", "quantity", "unit_price", "total")
+        for index, item in enumerate(raw_items):
+            if not isinstance(item, dict):
+                raise ExtractionError(f"Invalid line item at index {index}: expected an object")
+            missing = [
+                field for field in required_fields
+                if item.get(field) is None or str(item.get(field)).strip() == ""
+            ]
+            if missing:
+                raise ExtractionError(
+                    f"Incomplete line item at index {index}: missing {', '.join(missing)}"
+                )
+            description = str(item["description"]).strip()
+            if not description or description.casefold() in {
+                "unknown", "n/a", "na", "none", "null", "not provided"
+            }:
+                raise ExtractionError(f"Unverified line item description at index {index}")
+            try:
+                quantity = float(item["quantity"])
+                unit_price = float(item["unit_price"])
+                total = float(item["total"])
+            except (TypeError, ValueError):
+                raise ExtractionError(f"Invalid numeric value in line item at index {index}")
+            if any(not math.isfinite(value) or value < 0 for value in (quantity, unit_price, total)):
+                raise ExtractionError(f"Invalid negative or non-finite value in line item at index {index}")
+            try:
+                line_items.append(LineItem(
+                    description=description,
+                    quantity=quantity,
+                    unit_price=unit_price,
+                    total=total,
+                ))
+            except Exception as exc:
+                raise ExtractionError(f"Invalid line item at index {index}: {exc}") from exc
 
         return line_items
 
