@@ -45,6 +45,7 @@ class InvoiceSchema(BaseModel):
     billing_address: Optional[str] = Field(None, description="Billing address")
     notes: Optional[str] = Field(None, description="Additional notes or comments")
     po_number: Optional[str] = Field(None, description="Reference to Purchase Order number")
+    human_review_status: Literal["PENDING", "APPROVED", "REJECTED"] = Field(default="PENDING", description="Human review decision; extraction never approves automatically")
 
     @field_validator("invoice_date", "due_date")
     @classmethod
@@ -72,6 +73,7 @@ class PurchaseOrderSchema(BaseModel):
     payment_terms: Optional[str] = Field(None, description="Payment terms (e.g., Net 30)")
     contract_reference: Optional[str] = Field(None, description="Reference to contract")
     notes: Optional[str] = Field(None, description="Additional notes or comments")
+    human_review_status: Literal["PENDING", "APPROVED", "REJECTED"] = Field(default="PENDING", description="Human review decision; extraction never approves automatically")
 
     @field_validator("order_date", "expected_delivery_date")
     @classmethod
