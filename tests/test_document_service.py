@@ -172,6 +172,11 @@ class TestIngestPO:
         )
         mock_po_store.index_po.assert_called_once_with(po)
 
+    def test_missing_expected_vendor_is_rejected(self, service, mock_po_store, tmp_pdf):
+        with pytest.raises(DocumentProcessingError, match="expected vendor name is required"):
+            service.ingest_po(tmp_pdf, vendor_name="")
+
+        mock_po_store.index_po.assert_not_called()
     def test_vendor_mismatch_is_rejected_without_overwriting_extracted_value(
         self, service, mock_extraction_engine, mock_po_store, tmp_pdf
     ):
