@@ -181,16 +181,43 @@ class TestInvoiceValidation:
         assert invoice.currency == "USD"  # Default
         assert invoice.line_items == []
 
-    def test_validate_with_missing_required_uses_defaults(self, engine):
-        """Test that missing required fields get defaults."""
+    def test_validate_with_missing_critical_fields_fails(self, engine):
+        """Missing identity/date/amount must not be replaced with invented defaults."""
+        incomplete_data = {"total_amount": 500}
+
+        with pytest.raises(ExtractionError, match="vendor_name"):
+            engine._validate_invoice(incomplete_data)
+
+    def test_validate_rejects_placeholder_vendor(self, engine):
         incomplete_data = {
-            "total_amount": 500
+            "vendor_name": "Unknown Vendor",
+            "invoice_number": "INV-1",
+            "invoice_date": "2024-01-01",
+            "total_amount": 500,
         }
 
-        invoice = engine._validate_invoice(incomplete_data)
+        with pytest.raises(ExtractionError, match="vendor_name"):
+            engine._validate_invoice(incomplete_data)
 
-        assert invoice.vendor_name == "Unknown Vendor"
-        assert invoice.invoice_number == "N/A"
+    def test_validate_rejects_missing_amount(self, engine):
+        incomplete_data = {
+            "vendor_name": "Test Vendor",
+            "invoice_number": "INV-1",
+            "invoice_date": "2024-01-01",
+        }
+
+        with pytest.raises(ExtractionError, match="total_amount"):
+            engine._validate_invoice(incomplete_data)
+
+    def test_validate_rejects_missing_po_identity(self, engine):
+        incomplete_data = {
+            "vendor_name": "Test Vendor",
+            "order_date": "2024-01-01",
+            "total_amount": 500,
+        }
+
+        with pytest.raises(ExtractionError, match="po_number"):
+            engine._validate_po(incomplete_data)
 
     def test_validate_line_items(self, engine):
         """Test line item validation."""
