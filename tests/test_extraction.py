@@ -278,6 +278,7 @@ class TestInvoiceValidation:
             "invoice_number": "001",
             "invoice_date": "2024-01-01",
             "total_amount": 100,
+            "currency": "USD",
             "line_items": [bad_item],
         }
 
