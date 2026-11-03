@@ -361,7 +361,9 @@ class ExtractionEngine:
         if value is None or not str(value).strip():
             raise ExtractionError(f"Missing required field: {field}")
         normalized = str(value).strip()
-        if normalized.lower() in {"unknown", "n/a", "na", "none", "null", "not provided"}:
+        lowered = normalized.casefold()
+        placeholders = {"unknown", "n/a", "na", "none", "null", "not provided", "unknown vendor", "unknown invoice", "unknown date"}
+        if lowered in placeholders or lowered.startswith("unknown "):
             raise ExtractionError(f"Unverified required field: {field}")
         return normalized
 
