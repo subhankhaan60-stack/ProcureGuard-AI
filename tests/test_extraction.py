@@ -172,13 +172,14 @@ class TestInvoiceValidation:
             "vendor_name": "Test Vendor",
             "invoice_number": "123",
             "invoice_date": "2024-01-01",
-            "total_amount": 100.00
+            "total_amount": 100.00,
+            "currency": "PKR"
         }
 
         invoice = engine._validate_invoice(minimal_data)
 
         assert invoice.vendor_name == "Test Vendor"
-        assert invoice.currency == "USD"  # Default
+        assert invoice.currency == "PKR"
         assert invoice.line_items == []
 
     def test_validate_with_missing_critical_fields_fails(self, engine):
@@ -194,10 +195,35 @@ class TestInvoiceValidation:
             "invoice_number": "INV-1",
             "invoice_date": "2024-01-01",
             "total_amount": 500,
+            "currency": "USD",
         }
 
         with pytest.raises(ExtractionError, match="vendor_name"):
             engine._validate_invoice(incomplete_data)
+
+    def test_validate_rejects_missing_currency(self, engine):
+        data = {
+            "vendor_name": "Test Vendor",
+            "invoice_number": "INV-1",
+            "invoice_date": "2024-01-01",
+            "total_amount": 500,
+        }
+
+        with pytest.raises(ExtractionError, match="currency"):
+            engine._validate_invoice(data)
+
+    @pytest.mark.parametrize("currency", ["US", "USDD", "1AB", ""])
+    def test_validate_rejects_invalid_currency_code(self, engine, currency):
+        data = {
+            "vendor_name": "Test Vendor",
+            "invoice_number": "INV-1",
+            "invoice_date": "2024-01-01",
+            "total_amount": 500,
+            "currency": currency,
+        }
+
+        with pytest.raises(ExtractionError, match="currency"):
+            engine._validate_invoice(data)
 
     def test_validate_rejects_missing_amount(self, engine):
         incomplete_data = {
@@ -226,6 +252,7 @@ class TestInvoiceValidation:
             "invoice_number": "001",
             "invoice_date": "2024-01-01",
             "total_amount": 100,
+            "currency": "USD",
             "line_items": [
                 {"description": "Item 1", "quantity": 2, "unit_price": 25, "total": 50},
                 {"description": "Item 2", "quantity": 1, "unit_price": 50, "total": 50}
@@ -263,6 +290,7 @@ class TestInvoiceValidation:
             "invoice_number": "001",
             "invoice_date": "2024-01-01",
             "total_amount": 100,
+            "currency": "USD",
         }
 
         invoice = engine._validate_invoice(data)
