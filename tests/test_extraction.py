@@ -238,6 +238,37 @@ class TestInvoiceValidation:
         assert invoice.line_items[0].description == "Item 1"
         assert invoice.line_items[0].quantity == 2
 
+    @pytest.mark.parametrize("bad_item", [
+        {"description": "Item 1", "unit_price": 25, "total": 50},
+        {"description": "Item 1", "quantity": 2, "total": 50},
+        {"description": "Item 1", "quantity": 2, "unit_price": 25},
+        {"description": "Unknown", "quantity": 2, "unit_price": 25, "total": 50},
+        {"description": "Item 1", "quantity": float("nan"), "unit_price": 25, "total": 50},
+    ])
+    def test_rejects_incomplete_or_invalid_line_items(self, engine, bad_item):
+        data = {
+            "vendor_name": "Test",
+            "invoice_number": "001",
+            "invoice_date": "2024-01-01",
+            "total_amount": 100,
+            "line_items": [bad_item],
+        }
+
+        with pytest.raises(ExtractionError, match="line item"):
+            engine._validate_invoice(data)
+
+    def test_absent_line_items_remain_empty(self, engine):
+        data = {
+            "vendor_name": "Test",
+            "invoice_number": "001",
+            "invoice_date": "2024-01-01",
+            "total_amount": 100,
+        }
+
+        invoice = engine._validate_invoice(data)
+
+        assert invoice.line_items == []
+
 
 class TestExtractionErrors:
     """Test cases for error handling."""
