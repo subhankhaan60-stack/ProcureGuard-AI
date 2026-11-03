@@ -7,6 +7,7 @@ Prompts are loaded from the prompts/ directory as first-class engineering artifa
 
 import json
 import logging
+import math
 import re
 from pathlib import Path
 from typing import Callable, Optional, TypeVar
@@ -353,33 +354,65 @@ class ExtractionEngine:
 
         return line_items
 
-    def _validate_invoice(self, data: dict) -> InvoiceSchema:
-        """Validate and convert extracted data to InvoiceSchema."""
+    @staticmethod
+    def _required_text(data: dict, field: str) -> str:
+        """Return a required extracted value without inventing placeholders."""
+        value = data.get(field) if isinstance(data, dict) else None
+        if value is None or not str(value).strip():
+            raise ExtractionError(f"Missing required field: {field}")
+        normalized = str(value).strip()
+        if normalized.lower() in {"unknown", "n/a", "na", "none", "null", "not provided"}:
+            raise ExtractionError(f"Unverified required field: {field}")
+        return normalized
+
+    @staticmethod
+    def _required_amount(data: dict, field: str) -> float:
+        """Require an explicitly extracted amount; zero remains a valid value."""
+        value = data.get(field) if isinstance(data, dict) else None
+        if value is None or isinstance(value, bool) or str(value).strip() == "":
+            raise ExtractionError(f"Missing required field: {field}")
         try:
+            amount = float(value)
+        except (TypeError, ValueError):
+            raise ExtractionError(f"Invalid numeric field: {field}")
+        if amount < 0 or not math.isfinite(amount):
+            raise ExtractionError(f"Invalid numeric field: {field}")
+        return amount
+
+    def _validate_invoice(self, data: dict) -> InvoiceSchema:
+        """Validate extracted invoice data; missing critical facts require review."""
+        try:
+            if not isinstance(data, dict):
+                raise ExtractionError("Extracted invoice must be a JSON object")
             return InvoiceSchema(
-                vendor_name=str(data.get("vendor_name", "Unknown Vendor")),
-                invoice_number=str(data.get("invoice_number", "N/A")),
-                invoice_date=str(data.get("invoice_date", "Unknown")),
+                vendor_name=self._required_text(data, "vendor_name"),
+                invoice_number=self._required_text(data, "invoice_number"),
+                invoice_date=self._required_text(data, "invoice_date"),
                 due_date=data.get("due_date"),
-                total_amount=float(data.get("total_amount", 0)),
+                total_amount=self._required_amount(data, "total_amount"),
                 currency=str(data.get("currency", "USD")),
                 line_items=self._parse_line_items(data),
                 payment_terms=data.get("payment_terms"),
                 billing_address=data.get("billing_address"),
                 notes=data.get("notes"),
+                po_number=data.get("po_number"),
             )
+        except ExtractionError:
+            raise
         except Exception as e:
             raise ExtractionError(f"Validation failed: {str(e)}")
 
     def _validate_po(self, data: dict) -> PurchaseOrderSchema:
-        """Validate and convert extracted data to PurchaseOrderSchema."""
+        """Validate extracted PO data; missing critical facts require review."""
         try:
+            if not isinstance(data, dict):
+                raise ExtractionError("Extracted PO must be a JSON object")
             return PurchaseOrderSchema(
-                po_number=str(data.get("po_number", "N/A")),
-                vendor_name=str(data.get("vendor_name", "Unknown Vendor")),
-                order_date=str(data.get("order_date", "Unknown")),
+                po_number=self._required_text(data, "po_number"),
+                vendor_name=self._required_text(data, "vendor_name"),
+                order_date=self._required_text(data, "order_date"),
                 expected_delivery_date=data.get("expected_delivery_date"),
-                total_amount=float(data.get("total_amount", 0)),
+                total_amount=self._required_amount(data, "total_amount"),
                 currency=str(data.get("currency", "USD")),
                 line_items=self._parse_line_items(data),
                 billing_address=data.get("billing_address"),
@@ -388,6 +421,8 @@ class ExtractionEngine:
                 contract_reference=data.get("contract_reference"),
                 notes=data.get("notes"),
             )
+        except ExtractionError:
+            raise
         except Exception as e:
             raise ExtractionError(f"PO validation failed: {str(e)}")
 
