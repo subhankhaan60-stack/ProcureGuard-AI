@@ -410,6 +410,17 @@ class ExtractionEngine:
             raise ExtractionError(f"Invalid numeric field: {field}")
         return amount
 
+    @staticmethod
+    def _required_currency(data: dict) -> str:
+        """Require an explicit ISO-style currency code; never assume USD."""
+        value = data.get("currency") if isinstance(data, dict) else None
+        if value is None or not str(value).strip():
+            raise ExtractionError("Missing required field: currency")
+        currency = str(value).strip().upper()
+        if not re.fullmatch(r"[A-Z]{3}", currency):
+            raise ExtractionError("Invalid currency code: currency must be a 3-letter code")
+        return currency
+
     def _validate_invoice(self, data: dict) -> InvoiceSchema:
         """Validate extracted invoice data; missing critical facts require review."""
         try:
@@ -421,7 +432,7 @@ class ExtractionEngine:
                 invoice_date=self._required_text(data, "invoice_date"),
                 due_date=data.get("due_date"),
                 total_amount=self._required_amount(data, "total_amount"),
-                currency=str(data.get("currency", "USD")),
+                currency=self._required_currency(data),
                 line_items=self._parse_line_items(data),
                 payment_terms=data.get("payment_terms"),
                 billing_address=data.get("billing_address"),
@@ -444,7 +455,7 @@ class ExtractionEngine:
                 order_date=self._required_text(data, "order_date"),
                 expected_delivery_date=data.get("expected_delivery_date"),
                 total_amount=self._required_amount(data, "total_amount"),
-                currency=str(data.get("currency", "USD")),
+                currency=self._required_currency(data),
                 line_items=self._parse_line_items(data),
                 billing_address=data.get("billing_address"),
                 shipping_address=data.get("shipping_address"),
