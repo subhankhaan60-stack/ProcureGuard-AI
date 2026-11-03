@@ -28,7 +28,7 @@ from ..extraction import ExtractionEngine
 from ..models import InvoiceSchema, ParseResult, PurchaseOrderSchema
 from ..parser_engine import ParserEngine
 from ..po_store import POStore
-from ..vector_store import VectorStore
+from ..vector_store import VectorStore, normalize_vendor_name
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +112,9 @@ class DocumentService:
 
         Args:
             file_path: Path to the PO PDF
-            vendor_name: Vendor name (overrides LLM extraction)
+            vendor_name: Expected vendor name supplied by the operator. It must
+                agree with the vendor extracted from the PO; it never overrides
+                document evidence.
 
         Returns:
             Tuple of (PurchaseOrderSchema, ParseResult)
@@ -129,7 +131,19 @@ class DocumentService:
 
         # Extract structured PO data via LLM
         po = self.extraction_engine.extract_po_data(result.markdown)
-        po.vendor_name = vendor_name
+
+        # The operator-supplied vendor is a cross-check, not an override.
+        # Never replace extracted document evidence with caller input.
+        extracted_vendor = normalize_vendor_name(po.vendor_name)
+        expected_vendor = normalize_vendor_name(vendor_name)
+        if not expected_vendor:
+            raise DocumentProcessingError("An expected vendor name is required.")
+        if extracted_vendor.casefold() != expected_vendor.casefold():
+            raise DocumentProcessingError(
+                "The vendor supplied for this PO does not match the vendor "
+                "extracted from the document. Review the source document "
+                "before indexing it."
+            )
 
         # Index to ChromaDB
         self.po_store.index_po(po)
