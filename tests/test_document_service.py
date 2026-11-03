@@ -163,7 +163,7 @@ class TestIngestPO:
         po, result = service.ingest_po(tmp_pdf, vendor_name="Acme Corp")
 
         assert po.po_number == "PO-001"
-        assert po.vendor_name == "Acme Corp"  # Overridden from "Extracted Vendor"
+        assert po.vendor_name == "Acme Corp"
         assert result.success is True
 
         mock_parser.parse_to_markdown.assert_called_once()
@@ -172,10 +172,15 @@ class TestIngestPO:
         )
         mock_po_store.index_po.assert_called_once_with(po)
 
-    def test_vendor_name_override(self, service, tmp_pdf):
-        """Vendor name from caller overrides LLM-extracted vendor."""
-        po, _ = service.ingest_po(tmp_pdf, vendor_name="Override Vendor")
-        assert po.vendor_name == "Override Vendor"
+    def test_vendor_mismatch_is_rejected_without_overwriting_extracted_value(
+        self, service, mock_extraction_engine, mock_po_store, tmp_pdf
+    ):
+        """Caller input must not hide a vendor mismatch in the source PO."""
+        with pytest.raises(DocumentProcessingError, match="does not match"):
+            service.ingest_po(tmp_pdf, vendor_name="Override Vendor")
+
+        assert mock_extraction_engine.extract_po_data.return_value.vendor_name == "Extracted Vendor"
+        mock_po_store.index_po.assert_not_called()
 
     def test_parse_failure(self, service, mock_parser, tmp_pdf):
         mock_parser.parse_to_markdown.return_value = ParseResult(
