@@ -388,6 +388,8 @@ class Database:
                     }
 
             stored_status = "REVIEW" if duplicate else status
+            persisted_details = dict(details or {})
+            persisted_details["duplicate_invoice_candidate"] = duplicate
             result = Result(
                 job_id=job_id,
                 invoice_file=invoice_file,
@@ -397,7 +399,7 @@ class Database:
                 confidence=confidence,
                 matches_passed=matches_passed,
                 total_matches=total_matches,
-                details_json=json.dumps(details) if details else None,
+                details_json=json.dumps(persisted_details) if persisted_details else None,
             )
             session.add(result)
             self._audit(session, "result_saved", "result", invoice_number, {
