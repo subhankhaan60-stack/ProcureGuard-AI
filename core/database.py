@@ -335,6 +335,79 @@ class Database:
                 query = query.filter(Result.status == status)
             return query.order_by(Result.created_at.desc()).limit(limit).all()
 
+    def save_result_with_duplicate_check(
+        self,
+        job_id: int,
+        invoice_file: Optional[str] = None,
+        vendor_name: Optional[str] = None,
+        invoice_number: Optional[str] = None,
+        status: Optional[str] = None,
+        confidence: Optional[float] = None,
+        matches_passed: Optional[int] = None,
+        total_matches: Optional[int] = None,
+        details: Optional[dict] = None,
+    ) -> tuple[Result, Optional[dict]]:
+        """
+        Atomically check invoice identity and persist its result.
+
+        BEGIN IMMEDIATE obtains SQLite's reserved write lock before the
+        duplicate lookup. Concurrent writers therefore cannot both observe
+        the same identity as absent and then save it as a first occurrence.
+        """
+        vendor_key = (vendor_name or "").strip()
+        invoice_key = (invoice_number or "").strip()
+
+        with self.session() as session:
+            # Acquire the SQLite write reservation before reading identity.
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+
+            duplicate = None
+            if vendor_key and invoice_key:
+                query = session.query(Result).filter(
+                    Result.vendor_name.isnot(None),
+                    Result.invoice_number.isnot(None),
+                    func.upper(func.trim(Result.vendor_name)) == vendor_key.upper(),
+                    func.upper(func.trim(Result.invoice_number)) == invoice_key.upper(),
+                    Result.job_id != job_id,
+                )
+                previous = query.order_by(
+                    Result.created_at.desc(), Result.id.desc()
+                ).first()
+                if previous is not None:
+                    duplicate = {
+                        "result_id": previous.id,
+                        "job_id": previous.job_id,
+                        "invoice_file": previous.invoice_file,
+                        "vendor_name": previous.vendor_name,
+                        "invoice_number": previous.invoice_number,
+                        "status": previous.status,
+                        "created_at": (
+                            previous.created_at.isoformat()
+                            if previous.created_at else None
+                        ),
+                    }
+
+            stored_status = "REVIEW" if duplicate else status
+            result = Result(
+                job_id=job_id,
+                invoice_file=invoice_file,
+                vendor_name=vendor_name,
+                invoice_number=invoice_number,
+                status=stored_status,
+                confidence=confidence,
+                matches_passed=matches_passed,
+                total_matches=total_matches,
+                details_json=json.dumps(details) if details else None,
+            )
+            session.add(result)
+            self._audit(session, "result_saved", "result", invoice_number, {
+                "job_id": job_id, "status": stored_status,
+                "duplicate_candidate": duplicate is not None,
+            })
+            session.commit()
+            session.refresh(result)
+            return result, duplicate
+
     def find_duplicate_invoice(
         self,
         vendor_name: str,
