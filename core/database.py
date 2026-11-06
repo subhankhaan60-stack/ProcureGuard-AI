@@ -119,6 +119,20 @@ class Result(Base):
         return f"<Result(id={self.id}, invoice={self.invoice_number}, status={self.status})>"
 
 
+class VendorBankProfile(Base):
+    """Current vendor bank identity; never stores a full account number."""
+
+    __tablename__ = "vendor_bank_profiles"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    vendor_key = Column(String(255), nullable=False, unique=True, index=True)
+    vendor_name = Column(String(255), nullable=False)
+    bank_name = Column(String(255), nullable=False)
+    account_last4 = Column(String(4), nullable=False)
+    account_fingerprint = Column(String(128), nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
 class AuditLog(Base):
     """Audit trail for significant system actions."""
 
@@ -451,6 +465,76 @@ class Database:
                 "invoice_number": result.invoice_number,
                 "status": result.status,
                 "created_at": result.created_at.isoformat() if result.created_at else None,
+            }
+
+    # ==================== VENDOR BANK-DETAIL MONITORING ====================
+
+    def record_vendor_bank_details(
+        self,
+        vendor_name: str,
+        bank_name: str,
+        account_last4: str,
+        account_fingerprint: str,
+    ) -> dict:
+        """
+        Register or compare a vendor bank identity.
+
+        The caller must provide a keyed HMAC fingerprint of normalized bank
+        details. Raw account/routing numbers must never be passed or stored.
+        A changed fingerprint updates the profile and creates an auditable
+        REVIEW alert; it does not authorize a payment.
+        """
+        name = (vendor_name or "").strip()
+        bank = (bank_name or "").strip()
+        last4 = (account_last4 or "").strip()
+        fingerprint = (account_fingerprint or "").strip()
+        if not name or not bank or len(last4) != 4 or not last4.isdigit() or not fingerprint:
+            raise ValueError("Vendor, bank name, four-digit account suffix, and keyed fingerprint are required.")
+
+        vendor_key = name.casefold()
+        with self.session() as session:
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            profile = session.query(VendorBankProfile).filter(
+                VendorBankProfile.vendor_key == vendor_key
+            ).first()
+            if profile is None:
+                profile = VendorBankProfile(
+                    vendor_key=vendor_key,
+                    vendor_name=name,
+                    bank_name=bank,
+                    account_last4=last4,
+                    account_fingerprint=fingerprint,
+                )
+                session.add(profile)
+                self._audit(session, "vendor_bank_details_registered", "vendor", vendor_key, {
+                    "bank_name": bank, "account_last4": last4,
+                })
+                session.commit()
+                return {"status": "REGISTERED", "review_required": False, "vendor_name": name}
+
+            changed = profile.account_fingerprint != fingerprint
+            previous = {
+                "bank_name": profile.bank_name,
+                "account_last4": profile.account_last4,
+            }
+            if changed:
+                profile.bank_name = bank
+                profile.account_last4 = last4
+                profile.account_fingerprint = fingerprint
+                profile.updated_at = datetime.now(timezone.utc)
+                self._audit(session, "vendor_bank_details_changed", "vendor", vendor_key, {
+                    "previous": previous,
+                    "current": {"bank_name": bank, "account_last4": last4},
+                    "review_required": True,
+                    "payment_authorized": False,
+                })
+            session.commit()
+            return {
+                "status": "REVIEW" if changed else "UNCHANGED",
+                "review_required": changed,
+                "vendor_name": name,
+                "previous": previous if changed else None,
+                "current": {"bank_name": bank, "account_last4": last4},
             }
 
     # ==================== AUDIT OPERATIONS ====================
