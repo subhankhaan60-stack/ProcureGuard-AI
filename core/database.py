@@ -41,6 +41,7 @@ from sqlalchemy import (
     Text,
     create_engine,
     event,
+    func,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
 
@@ -333,6 +334,49 @@ class Database:
             if status:
                 query = query.filter(Result.status == status)
             return query.order_by(Result.created_at.desc()).limit(limit).all()
+
+    def find_duplicate_invoice(
+        self,
+        vendor_name: str,
+        invoice_number: str,
+        exclude_job_id: Optional[int] = None,
+    ) -> Optional[dict]:
+        """
+        Find a previously processed invoice with the same vendor and invoice number.
+
+        Matching is case-insensitive and ignores leading/trailing whitespace.
+        Amount and currency are deliberately not used as identity fields: a
+        repeated invoice reference remains a duplicate candidate even if its
+        extracted amount differs. The caller must route the candidate for
+        human review rather than treating it as proof of fraud.
+        """
+        vendor_key = (vendor_name or "").strip()
+        invoice_key = (invoice_number or "").strip()
+        if not vendor_key or not invoice_key:
+            return None
+
+        with self.session() as session:
+            query = session.query(Result).filter(
+                Result.vendor_name.isnot(None),
+                Result.invoice_number.isnot(None),
+                func.upper(func.trim(Result.vendor_name)) == vendor_key.upper(),
+                func.upper(func.trim(Result.invoice_number)) == invoice_key.upper(),
+            )
+            if exclude_job_id is not None:
+                query = query.filter(Result.job_id != exclude_job_id)
+
+            result = query.order_by(Result.created_at.desc(), Result.id.desc()).first()
+            if result is None:
+                return None
+            return {
+                "result_id": result.id,
+                "job_id": result.job_id,
+                "invoice_file": result.invoice_file,
+                "vendor_name": result.vendor_name,
+                "invoice_number": result.invoice_number,
+                "status": result.status,
+                "created_at": result.created_at.isoformat() if result.created_at else None,
+            }
 
     # ==================== AUDIT OPERATIONS ====================
 
