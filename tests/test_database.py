@@ -451,3 +451,53 @@ class TestConcurrency:
         with db.session() as s2:
             j2 = s2.get(Job, job.id)
             assert j2.status == "COMPLETE"
+
+
+
+# ==================== VENDOR BANK-DETAIL MONITORING ====================
+
+
+class TestVendorBankDetailMonitoring:
+    def test_first_bank_profile_is_registered_without_alert(self, db):
+        result = db.record_vendor_bank_details(
+            "Acme Corp", "Example Bank", "1234", "hmac-v1:initial"
+        )
+        assert result["status"] == "REGISTERED"
+        assert result["review_required"] is False
+
+    def test_changed_bank_fingerprint_creates_review_alert(self, db):
+        db.record_vendor_bank_details(
+            "Acme Corp", "Example Bank", "1234", "hmac-v1:initial"
+        )
+        result = db.record_vendor_bank_details(
+            " ACME CORP ", "New Bank", "9876", "hmac-v1:changed"
+        )
+        assert result["status"] == "REVIEW"
+        assert result["review_required"] is True
+        assert result["previous"] == {
+            "bank_name": "Example Bank", "account_last4": "1234"
+        }
+        assert result["current"] == {
+            "bank_name": "New Bank", "account_last4": "9876"
+        }
+        logs = db.get_audit_log(entity_type="vendor")
+        alert = next(log for log in logs if log.action == "vendor_bank_details_changed")
+        metadata = json.loads(alert.extra_data)
+        assert metadata["review_required"] is True
+        assert metadata["payment_authorized"] is False
+
+    def test_same_fingerprint_does_not_create_alert(self, db):
+        db.record_vendor_bank_details(
+            "Acme Corp", "Example Bank", "1234", "hmac-v1:initial"
+        )
+        result = db.record_vendor_bank_details(
+            "Acme Corp", "Example Bank", "1234", "hmac-v1:initial"
+        )
+        assert result["status"] == "UNCHANGED"
+        assert result["review_required"] is False
+
+    def test_invalid_bank_identity_is_rejected(self, db):
+        with pytest.raises(ValueError):
+            db.record_vendor_bank_details(
+                "Acme Corp", "Example Bank", "12345", "hmac-v1:initial"
+            )
