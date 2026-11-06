@@ -246,8 +246,10 @@ class TestAutoMatchPO:
         assert result.match_method == "exact"
         assert result.confidence == 1.0
 
-    def test_exact_match_not_found_falls_to_fuzzy(self, service, mock_po_store, sample_invoice):
-        """PO number on invoice doesn't exist, falls through to fuzzy."""
+    def test_explicit_po_not_found_does_not_substitute_another_po(
+        self, service, mock_po_store, sample_invoice
+    ):
+        """An unresolved explicit PO reference must not silently select another PO."""
         mock_po_store.get_po_by_number.return_value = None
         mock_po_store.get_pos_by_vendor.return_value = [
             PurchaseOrderSchema(
@@ -257,8 +259,41 @@ class TestAutoMatchPO:
         ]
 
         result = service.auto_match_po(sample_invoice)
-        assert result.po_number == "PO-FUZZY"
-        assert result.match_method == "fuzzy"
+        assert result.po_number is None
+        assert result.match_method is None
+        mock_po_store.get_pos_by_vendor.assert_not_called()
+
+    def test_fuzzy_match_rejects_different_currency(
+        self, service, mock_po_store, sample_invoice_no_po
+    ):
+        sample_invoice_no_po.currency = "PKR"
+        mock_po_store.get_pos_by_vendor.return_value = [
+            PurchaseOrderSchema(
+                po_number="PO-USD", vendor_name="Acme Corp",
+                order_date="2024-01-10", total_amount=5000.00,
+                currency="USD",
+            )
+        ]
+
+        result = service.auto_match_po(sample_invoice_no_po)
+
+        assert result.po_number is None
+        assert result.match_method is None
+
+    def test_fuzzy_match_rejects_vendor_name_mismatch(
+        self, service, mock_po_store, sample_invoice_no_po
+    ):
+        mock_po_store.get_pos_by_vendor.return_value = [
+            PurchaseOrderSchema(
+                po_number="PO-OTHER", vendor_name="Different Vendor",
+                order_date="2024-01-10", total_amount=5000.00,
+            )
+        ]
+
+        result = service.auto_match_po(sample_invoice_no_po)
+
+        assert result.po_number is None
+        assert result.match_method is None
 
     def test_fuzzy_match_single_candidate(self, service, mock_po_store, sample_invoice_no_po):
         """Single vendor PO with matching amount -> fuzzy match."""

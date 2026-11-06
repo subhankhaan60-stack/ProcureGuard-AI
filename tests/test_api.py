@@ -31,6 +31,7 @@ from core.models import (
     ValidationIssue,
 )
 from core.services import DocumentProcessingError
+from config import settings
 
 
 # ==================== FIXTURES ====================
@@ -64,13 +65,14 @@ def mock_database():
 
 
 @pytest.fixture
-def client(mock_doc_service, mock_match_service, mock_batch_service, mock_database):
+def client(mock_doc_service, mock_match_service, mock_batch_service, mock_database, monkeypatch):
     """TestClient with mocked dependencies."""
+    monkeypatch.setattr(settings, "api_auth_token", "test-secret")
     app.dependency_overrides[get_document_service] = lambda: mock_doc_service
     app.dependency_overrides[get_match_service] = lambda: mock_match_service
     app.dependency_overrides[get_batch_service] = lambda: mock_batch_service
     app.dependency_overrides[get_database] = lambda: mock_database
-    yield TestClient(app)
+    yield TestClient(app, headers={"X-API-Key": "test-secret"})
     app.dependency_overrides.clear()
 
 
@@ -155,6 +157,24 @@ def sample_three_way_result():
         ],
         matched_clauses=[],
     )
+
+
+# ==================== API AUTHENTICATION ====================
+
+class TestAPIAuthentication:
+    def test_rejects_missing_api_key(self, client):
+        response = client.get("/api/stats", headers={"X-API-Key": ""})
+        assert response.status_code == 401
+
+    def test_rejects_invalid_api_key(self, client):
+        response = client.get("/api/stats", headers={"X-API-Key": "wrong-secret"})
+        assert response.status_code == 401
+
+    def test_rejects_requests_when_server_secret_is_not_configured(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "api_auth_token", None)
+        response = client.get("/api/stats")
+        assert response.status_code == 503
+        assert "API_AUTH_TOKEN" in response.json()["detail"]
 
 
 # ==================== CONTRACT INGESTION ====================
@@ -409,6 +429,32 @@ class TestInvoiceProcess:
 class TestHealthCheck:
     """Tests for GET /api/health."""
 
+    def test_cors_allows_configured_local_origin(self, client):
+        response = client.options(
+            "/api/health",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "content-type,x-api-key",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+        assert "x-api-key" in response.headers["access-control-allow-headers"].lower()
+        assert "access-control-allow-credentials" not in response.headers
+
+    def test_cors_rejects_unconfigured_origin(self, client):
+        response = client.options(
+            "/api/health",
+            headers={
+                "Origin": "https://untrusted.example",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+        assert "access-control-allow-origin" not in response.headers
+
     def test_healthy(self, client, mock_doc_service):
         response = client.get("/api/health")
 
@@ -441,7 +487,7 @@ class TestHealthCheck:
         data = response.json()
         assert data["status"] == "degraded"
         assert data["components"]["chromadb"]["status"] == "error"
-        assert "Connection refused" in data["components"]["chromadb"]["detail"]
+        assert data["components"]["chromadb"]["detail"] == "Health check failed"
 
     def test_pdfplumber_fallback(self, client, mock_doc_service):
         mock_doc_service.parser._docling_available = False
@@ -458,15 +504,21 @@ class TestHealthCheck:
 class TestBatchAPI:
     """Tests for batch processing API endpoints."""
 
-    def test_submit_batch(self, client, mock_batch_service):
+    def test_submit_batch(self, client, mock_batch_service, tmp_path, monkeypatch):
         mock_batch_service.submit_batch.return_value = 42
+        monkeypatch.setattr(settings, "invoices_dir", str(tmp_path))
+
+        invoice_one = tmp_path / "inv1.pdf"
+        invoice_two = tmp_path / "inv2.pdf"
+        invoice_one.write_bytes(b"%PDF-1.4 fake content")
+        invoice_two.write_bytes(b"%PDF-1.4 fake content")
 
         response = client.post(
             "/api/batch/process",
             json={
                 "files": [
-                    {"file_path": "/tmp/inv1.pdf", "po_number": "PO-001"},
-                    {"file_path": "/tmp/inv2.pdf"},
+                    {"file_path": str(invoice_one), "po_number": "PO-001"},
+                    {"file_path": str(invoice_two)},
                 ]
             },
         )

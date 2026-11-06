@@ -100,6 +100,24 @@ uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload
 
 Full OpenAPI docs at `http://localhost:8000/docs` when running.
 
+### API access protection
+
+All `/api/*` endpoints require the shared `X-API-Key` header. Configure `API_AUTH_TOKEN` in your `.env` file before using the API. Generate a strong secret locally with:
+
+```bash
+openssl rand -hex 32
+```
+
+Do not commit the generated secret or share it in screenshots/logs. Docker Compose passes `API_AUTH_TOKEN` from the host environment into the API container. If the token is not configured, API routes fail closed with HTTP 503; missing or incorrect keys receive HTTP 401.
+
+This is a single shared deployment key, **not** individual user accounts, roles, or company-level data isolation. Do not treat it as multi-tenant SaaS authentication.
+
+Example:
+
+```bash
+curl -H "X-API-Key: $API_AUTH_TOKEN" http://localhost:8000/api/stats
+```
+
 ```bash
 # Ingest a contract
 curl -X POST http://localhost:8000/api/contracts/ingest \
@@ -126,6 +144,33 @@ curl "http://localhost:8000/api/results?status=FAIL&vendor_name=Acme"
 # System health
 curl http://localhost:8000/api/health
 ```
+
+## Human Review Gate
+
+Every extracted invoice and purchase order starts with `human_review_status: PENDING`.
+Extraction and matching results are decision support only; they do not constitute
+human approval or authorization to pay. A qualified reviewer must compare critical
+values against the original document before approval. The current schema records
+the pending state; reviewer identity, approval actions, immutable decision history,
+and field-level page citations are not yet implemented.
+
+## Vendor Bank-Detail Change Monitoring
+
+The SQLite metadata store can register a vendor's bank identity and compare later
+updates. A changed keyed fingerprint creates a `vendor_bank_details_changed`
+audit event and returns `REVIEW`; it is a warning for a human verifier, not a
+fraud finding or payment authorization. The stored profile contains the bank
+name, account suffix (last four digits), and an opaque fingerprint—not a full
+account or routing number.
+
+The caller must calculate `account_fingerprint` as an HMAC over consistently
+normalized bank details, using a secret held outside the database and source
+control. Do not pass raw account/routing numbers to this method. Plain hashes
+are not a substitute for HMAC. The current implementation provides the
+database-level registration and change-detection primitive; it does not yet
+provide a vendor-facing workflow, reviewer identity, approval/rejection action,
+or payment-system block. If the HMAC secret is unavailable or changes, do not
+silently register a new baseline—require controlled re-verification.
 
 ## Evaluation Results
 

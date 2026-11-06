@@ -48,6 +48,15 @@ class Settings(BaseSettings):
     # SQLite Database
     db_path: str = "./data/documatch.db"
 
+    # API security and browser access
+    cors_allowed_origins: list[str] = [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://localhost:8501",
+    ]
+    api_docs_enabled: bool = True
+    api_auth_token: Optional[str] = None
+
     # Three-Way Matching Configuration
     match_tolerance: float = 0.01  # 1% tolerance for amount comparisons
 

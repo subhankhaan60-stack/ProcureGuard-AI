@@ -598,6 +598,40 @@ class Matcher:
         issues = []
         score = 1.0
 
+        # Verify that the invoice and PO belong to the same vendor.
+        invoice_vendor = normalize_vendor_name(invoice.vendor_name).casefold()
+        po_vendor = normalize_vendor_name(po.vendor_name).casefold()
+        if invoice_vendor != po_vendor:
+            issues.append(ValidationIssue(
+                rule="vendor_match",
+                severity="critical",
+                message=(
+                    f"Invoice vendor '{invoice.vendor_name}' does not match "
+                    f"PO vendor '{po.vendor_name}'"
+                ),
+                invoice_value=invoice.vendor_name,
+                contract_value=po.vendor_name,
+                match_type="invoice_po"
+            ))
+            score -= 0.3
+
+        # Currency must match before comparing monetary values.
+        invoice_currency = invoice.currency.strip().upper()
+        po_currency = po.currency.strip().upper()
+        if invoice_currency != po_currency:
+            issues.append(ValidationIssue(
+                rule="currency_match",
+                severity="critical",
+                message=(
+                    f"Invoice currency '{invoice_currency}' does not match "
+                    f"PO currency '{po_currency}'"
+                ),
+                invoice_value=invoice_currency,
+                contract_value=po_currency,
+                match_type="invoice_po"
+            ))
+            score -= 0.3
+
         # Check PO number
         if invoice.po_number and invoice.po_number != po.po_number:
             issues.append(ValidationIssue(
@@ -630,15 +664,13 @@ class Matcher:
         issues.extend(line_issues)
         score -= len(line_issues) * 0.1
 
-        # Determine if match passed
-        # Invoice↔PO match requires NO critical issues AND NO error issues with significant mismatches
-        has_critical = any(i.severity == "critical" for i in issues)
-        has_total_mismatch = any(i.rule == "total_match" for i in issues)
-        has_qty_or_price_errors = any(i.rule in ("line_qty_match", "line_price_match") for i in issues)
-
-        # Stricter: fail if there's a total mismatch or both qty and price errors
-        significant_errors = has_total_mismatch and has_qty_or_price_errors
-        passed = not has_critical and not significant_errors and score >= 0.6
+        # A match cannot pass when any discrepancy or warning remains.
+        # In particular, a total-only or line-only mismatch must not be ignored.
+        blocking_issues = any(
+            issue.severity in ("critical", "error", "warning")
+            for issue in issues
+        )
+        passed = not blocking_issues and score >= 0.6
 
         return MatchDetail(
             match_type="invoice_po",
@@ -843,62 +875,105 @@ class Matcher:
         po_items: List,
         match_type: str,
     ) -> List[ValidationIssue]:
-        """Compare line items between invoice and PO."""
+        """Compare invoice lines to distinct PO lines and explain variances."""
         issues = []
 
-        if not invoice_items or not po_items:
+        if not invoice_items:
             return issues
+        if not po_items:
+            return [ValidationIssue(
+                rule="po_line_items_missing",
+                severity="warning",
+                message=(
+                    "Invoice contains line items, but the referenced PO has no "
+                    "line-item detail available for quantity or price verification"
+                ),
+                invoice_value=len(invoice_items),
+                contract_value=None,
+                match_type=match_type,
+            )]
 
-        # Build lookup of PO items by description
-        po_lookup = {}
-        for item in po_items:
-            key = item.description.lower().strip()
-            po_lookup[key] = item
+        used_po_indices = set()
 
-        # Check each invoice item
         for inv_item in invoice_items:
             inv_key = inv_item.description.lower().strip()
+            matched_index = None
 
-            # Try to find matching PO item
-            matched = False
-            for po_key, po_item in po_lookup.items():
+            # Each PO line can be consumed only once.
+            for index, po_item in enumerate(po_items):
+                if index in used_po_indices:
+                    continue
+                po_key = po_item.description.lower().strip()
                 if self._fuzzy_match(inv_key, po_key):
-                    matched = True
-
-                    # Check quantity
-                    if abs(inv_item.quantity - po_item.quantity) > 0.01:
-                        issues.append(ValidationIssue(
-                            rule="line_qty_match",
-                            severity="error",
-                            message=f"Quantity mismatch for '{inv_item.description}': Invoice={inv_item.quantity}, PO={po_item.quantity}",
-                            invoice_value=inv_item.quantity,
-                            contract_value=po_item.quantity,
-                            match_type=match_type
-                        ))
-
-                    # Check unit price
-                    price_diff = abs(inv_item.unit_price - po_item.unit_price)
-                    max_price = max(inv_item.unit_price, po_item.unit_price)
-                    tolerance = max_price * self.match_tolerance if max_price > 0 else 0.01
-                    if price_diff > tolerance:
-                        issues.append(ValidationIssue(
-                            rule="line_price_match",
-                            severity="error",
-                            message=f"Price mismatch for '{inv_item.description}': Invoice=${inv_item.unit_price:.2f}, PO=${po_item.unit_price:.2f}",
-                            invoice_value=inv_item.unit_price,
-                            contract_value=po_item.unit_price,
-                            match_type=match_type
-                        ))
+                    matched_index = index
                     break
 
-            if not matched and len(po_items) > 0:
+            if matched_index is None:
                 issues.append(ValidationIssue(
                     rule="line_item_not_found",
                     severity="warning",
-                    message=f"Invoice item '{inv_item.description}' not found in PO",
+                    message=(
+                        f"Invoice item '{inv_item.description}' has no unused "
+                        "matching PO line; manual mapping is required"
+                    ),
                     invoice_value=inv_item.description,
                     contract_value=None,
-                    match_type=match_type
+                    match_type=match_type,
+                ))
+                continue
+
+            used_po_indices.add(matched_index)
+            po_item = po_items[matched_index]
+
+            # Quantity: over-billing is an error; lower invoiced quantity can
+            # represent a partial delivery, so flag it for review as warning.
+            quantity_delta = inv_item.quantity - po_item.quantity
+            if abs(quantity_delta) > 0.01:
+                direction = "exceeds" if quantity_delta > 0 else "is below"
+                severity = "error" if quantity_delta > 0 else "warning"
+                issues.append(ValidationIssue(
+                    rule="line_qty_match",
+                    severity=severity,
+                    message=(
+                        f"Invoice quantity for '{inv_item.description}' "
+                        f"{direction} PO quantity by {abs(quantity_delta):g} "
+                        f"(Invoice={inv_item.quantity:g}, PO={po_item.quantity:g})"
+                    ),
+                    invoice_value=inv_item.quantity,
+                    contract_value=po_item.quantity,
+                    match_type=match_type,
+                ))
+
+            # Price variance is measured against the PO's unit price.
+            # A higher invoice price is an error; a lower price is a warning.
+            price_delta = inv_item.unit_price - po_item.unit_price
+            tolerance = (
+                abs(po_item.unit_price) * self.match_tolerance
+                if po_item.unit_price != 0 else 0.01
+            )
+            if abs(price_delta) > tolerance:
+                variance_pct = (
+                    abs(price_delta) / abs(po_item.unit_price) * 100
+                    if po_item.unit_price != 0 else None
+                )
+                direction = "above" if price_delta > 0 else "below"
+                severity = "error" if price_delta > 0 else "warning"
+                variance_text = (
+                    f" ({variance_pct:.2f}% variance)" if variance_pct is not None
+                    else " (percentage variance unavailable because PO price is zero)"
+                )
+                issues.append(ValidationIssue(
+                    rule="line_price_match",
+                    severity=severity,
+                    message=(
+                        f"Invoice unit price for '{inv_item.description}' is "
+                        f"{direction} PO price by {abs(price_delta):.2f}"
+                        f"{variance_text}; Invoice={inv_item.unit_price:.2f}, "
+                        f"PO={po_item.unit_price:.2f}, tolerance={tolerance:.2f}"
+                    ),
+                    invoice_value=inv_item.unit_price,
+                    contract_value=po_item.unit_price,
+                    match_type=match_type,
                 ))
 
         return issues

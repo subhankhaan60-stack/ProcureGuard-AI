@@ -6,6 +6,8 @@ Uses temp directories so each test gets a fresh database.
 """
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 import pytest
 from pathlib import Path
 
@@ -242,6 +244,51 @@ class TestResultOperations:
         passed = db.get_results(status="PASS")
         assert len(passed) == 2
 
+    def test_find_duplicate_invoice_matches_vendor_and_number_case_insensitively(self, db):
+        job = db.create_job(job_type="invoice_process")
+        db.save_result(
+            job_id=job.id,
+            invoice_file="first.pdf",
+            vendor_name=" Acme Corp ",
+            invoice_number=" inv-001 ",
+            status="PASS",
+        )
+
+        duplicate = db.find_duplicate_invoice("acme corp", "INV-001")
+
+        assert duplicate is not None
+        assert duplicate["job_id"] == job.id
+        assert duplicate["invoice_file"] == "first.pdf"
+        assert duplicate["vendor_name"] == " Acme Corp "
+        assert duplicate["invoice_number"] == " inv-001 "
+
+    def test_find_duplicate_invoice_does_not_match_different_vendor_or_number(self, db):
+        job = db.create_job(job_type="invoice_process")
+        db.save_result(
+            job_id=job.id,
+            vendor_name="Acme Corp",
+            invoice_number="INV-001",
+        )
+
+        assert db.find_duplicate_invoice("Other Vendor", "INV-001") is None
+        assert db.find_duplicate_invoice("Acme Corp", "INV-002") is None
+
+    def test_find_duplicate_invoice_can_exclude_current_job(self, db):
+        job = db.create_job(job_type="invoice_process")
+        db.save_result(
+            job_id=job.id,
+            vendor_name="Acme Corp",
+            invoice_number="INV-001",
+        )
+
+        assert db.find_duplicate_invoice(
+            "Acme Corp", "INV-001", exclude_job_id=job.id
+        ) is None
+
+    def test_find_duplicate_invoice_ignores_blank_identity_fields(self, db):
+        assert db.find_duplicate_invoice("", "INV-001") is None
+        assert db.find_duplicate_invoice("Acme Corp", "   ") is None
+
     def test_job_result_cascade_delete(self, db):
         """Deleting a job should delete its results."""
         job = db.create_job(job_type="invoice_process")
@@ -364,6 +411,32 @@ class TestStats:
 class TestConcurrency:
     """Tests for concurrent access patterns."""
 
+    def test_concurrent_duplicate_identity_is_serialized(self, db):
+        """Only the first concurrent save may be stored without REVIEW."""
+        jobs = [
+            db.create_job(job_type="invoice_process"),
+            db.create_job(job_type="invoice_process"),
+        ]
+        barrier = Barrier(2)
+
+        def save(job):
+            barrier.wait(timeout=5)
+            return db.save_result_with_duplicate_check(
+                job_id=job.id,
+                invoice_file=f"{job.id}.pdf",
+                vendor_name="Acme Corp",
+                invoice_number="INV-RACE-001",
+                status="PASS",
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(save, jobs))
+
+        statuses = sorted(result.status for result, _ in results)
+        assert statuses == ["PASS", "REVIEW"]
+        assert sum(duplicate is not None for _, duplicate in results) == 1
+        assert len(db.get_results()) == 2
+
     def test_multiple_sessions(self, db):
         """Multiple sessions should work without conflicts (WAL mode)."""
         job = db.create_job(job_type="invoice_process")
@@ -378,3 +451,53 @@ class TestConcurrency:
         with db.session() as s2:
             j2 = s2.get(Job, job.id)
             assert j2.status == "COMPLETE"
+
+
+
+# ==================== VENDOR BANK-DETAIL MONITORING ====================
+
+
+class TestVendorBankDetailMonitoring:
+    def test_first_bank_profile_is_registered_without_alert(self, db):
+        result = db.record_vendor_bank_details(
+            "Acme Corp", "Example Bank", "1234", "hmac-v1:initial"
+        )
+        assert result["status"] == "REGISTERED"
+        assert result["review_required"] is False
+
+    def test_changed_bank_fingerprint_creates_review_alert(self, db):
+        db.record_vendor_bank_details(
+            "Acme Corp", "Example Bank", "1234", "hmac-v1:initial"
+        )
+        result = db.record_vendor_bank_details(
+            " ACME CORP ", "New Bank", "9876", "hmac-v1:changed"
+        )
+        assert result["status"] == "REVIEW"
+        assert result["review_required"] is True
+        assert result["previous"] == {
+            "bank_name": "Example Bank", "account_last4": "1234"
+        }
+        assert result["current"] == {
+            "bank_name": "New Bank", "account_last4": "9876"
+        }
+        logs = db.get_audit_log(entity_type="vendor")
+        alert = next(log for log in logs if log.action == "vendor_bank_details_changed")
+        metadata = json.loads(alert.extra_data)
+        assert metadata["review_required"] is True
+        assert metadata["payment_authorized"] is False
+
+    def test_same_fingerprint_does_not_create_alert(self, db):
+        db.record_vendor_bank_details(
+            "Acme Corp", "Example Bank", "1234", "hmac-v1:initial"
+        )
+        result = db.record_vendor_bank_details(
+            "Acme Corp", "Example Bank", "1234", "hmac-v1:initial"
+        )
+        assert result["status"] == "UNCHANGED"
+        assert result["review_required"] is False
+
+    def test_invalid_bank_identity_is_rejected(self, db):
+        with pytest.raises(ValueError):
+            db.record_vendor_bank_details(
+                "Acme Corp", "Example Bank", "12345", "hmac-v1:initial"
+            )

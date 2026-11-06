@@ -7,6 +7,7 @@ Prompts are loaded from the prompts/ directory as first-class engineering artifa
 
 import json
 import logging
+import math
 import re
 from pathlib import Path
 from typing import Callable, Optional, TypeVar
@@ -337,50 +338,124 @@ class ExtractionEngine:
 
     @staticmethod
     def _parse_line_items(data: dict) -> list[LineItem]:
-        """Parse line items from extracted data dict."""
-        line_items = []
+        """Parse supplied line items without inventing missing values."""
         raw_items = data.get("line_items", [])
+        if raw_items is None:
+            return []
+        if not isinstance(raw_items, list):
+            raise ExtractionError("Invalid line_items: expected a list")
 
-        if isinstance(raw_items, list):
-            for item in raw_items:
-                if isinstance(item, dict):
-                    line_items.append(LineItem(
-                        description=str(item.get("description", "Unknown")),
-                        quantity=float(item.get("quantity", 1)),
-                        unit_price=float(item.get("unit_price", 0)),
-                        total=float(item.get("total", 0)),
-                    ))
+        line_items = []
+        required_fields = ("description", "quantity", "unit_price", "total")
+        for index, item in enumerate(raw_items):
+            if not isinstance(item, dict):
+                raise ExtractionError(f"Invalid line item at index {index}: expected an object")
+            missing = [
+                field for field in required_fields
+                if item.get(field) is None or str(item.get(field)).strip() == ""
+            ]
+            if missing:
+                raise ExtractionError(
+                    f"Incomplete line item at index {index}: missing {', '.join(missing)}"
+                )
+            description = str(item["description"]).strip()
+            if not description or description.casefold() in {
+                "unknown", "n/a", "na", "none", "null", "not provided"
+            }:
+                raise ExtractionError(f"Unverified line item description at index {index}")
+            try:
+                quantity = float(item["quantity"])
+                unit_price = float(item["unit_price"])
+                total = float(item["total"])
+            except (TypeError, ValueError):
+                raise ExtractionError(f"Invalid numeric value in line item at index {index}")
+            if any(not math.isfinite(value) or value < 0 for value in (quantity, unit_price, total)):
+                raise ExtractionError(f"Invalid negative or non-finite value in line item at index {index}")
+            try:
+                line_items.append(LineItem(
+                    description=description,
+                    quantity=quantity,
+                    unit_price=unit_price,
+                    total=total,
+                ))
+            except Exception as exc:
+                raise ExtractionError(f"Invalid line item at index {index}: {exc}") from exc
 
         return line_items
 
-    def _validate_invoice(self, data: dict) -> InvoiceSchema:
-        """Validate and convert extracted data to InvoiceSchema."""
+    @staticmethod
+    def _required_text(data: dict, field: str) -> str:
+        """Return a required extracted value without inventing placeholders."""
+        value = data.get(field) if isinstance(data, dict) else None
+        if value is None or not str(value).strip():
+            raise ExtractionError(f"Missing required field: {field}")
+        normalized = str(value).strip()
+        lowered = normalized.casefold()
+        placeholders = {"unknown", "n/a", "na", "none", "null", "not provided", "unknown vendor", "unknown invoice", "unknown date"}
+        if lowered in placeholders or lowered.startswith("unknown "):
+            raise ExtractionError(f"Unverified required field: {field}")
+        return normalized
+
+    @staticmethod
+    def _required_amount(data: dict, field: str) -> float:
+        """Require an explicitly extracted amount; zero remains a valid value."""
+        value = data.get(field) if isinstance(data, dict) else None
+        if value is None or isinstance(value, bool) or str(value).strip() == "":
+            raise ExtractionError(f"Missing required field: {field}")
         try:
+            amount = float(value)
+        except (TypeError, ValueError):
+            raise ExtractionError(f"Invalid numeric field: {field}")
+        if amount < 0 or not math.isfinite(amount):
+            raise ExtractionError(f"Invalid numeric field: {field}")
+        return amount
+
+    @staticmethod
+    def _required_currency(data: dict) -> str:
+        """Require an explicit ISO-style currency code; never assume USD."""
+        value = data.get("currency") if isinstance(data, dict) else None
+        if value is None or not str(value).strip():
+            raise ExtractionError("Missing required field: currency")
+        currency = str(value).strip().upper()
+        if not re.fullmatch(r"[A-Z]{3}", currency):
+            raise ExtractionError("Invalid currency code: currency must be a 3-letter code")
+        return currency
+
+    def _validate_invoice(self, data: dict) -> InvoiceSchema:
+        """Validate extracted invoice data; missing critical facts require review."""
+        try:
+            if not isinstance(data, dict):
+                raise ExtractionError("Extracted invoice must be a JSON object")
             return InvoiceSchema(
-                vendor_name=str(data.get("vendor_name", "Unknown Vendor")),
-                invoice_number=str(data.get("invoice_number", "N/A")),
-                invoice_date=str(data.get("invoice_date", "Unknown")),
+                vendor_name=self._required_text(data, "vendor_name"),
+                invoice_number=self._required_text(data, "invoice_number"),
+                invoice_date=self._required_text(data, "invoice_date"),
                 due_date=data.get("due_date"),
-                total_amount=float(data.get("total_amount", 0)),
-                currency=str(data.get("currency", "USD")),
+                total_amount=self._required_amount(data, "total_amount"),
+                currency=self._required_currency(data),
                 line_items=self._parse_line_items(data),
                 payment_terms=data.get("payment_terms"),
                 billing_address=data.get("billing_address"),
                 notes=data.get("notes"),
+                po_number=data.get("po_number"),
             )
+        except ExtractionError:
+            raise
         except Exception as e:
             raise ExtractionError(f"Validation failed: {str(e)}")
 
     def _validate_po(self, data: dict) -> PurchaseOrderSchema:
-        """Validate and convert extracted data to PurchaseOrderSchema."""
+        """Validate extracted PO data; missing critical facts require review."""
         try:
+            if not isinstance(data, dict):
+                raise ExtractionError("Extracted PO must be a JSON object")
             return PurchaseOrderSchema(
-                po_number=str(data.get("po_number", "N/A")),
-                vendor_name=str(data.get("vendor_name", "Unknown Vendor")),
-                order_date=str(data.get("order_date", "Unknown")),
+                po_number=self._required_text(data, "po_number"),
+                vendor_name=self._required_text(data, "vendor_name"),
+                order_date=self._required_text(data, "order_date"),
                 expected_delivery_date=data.get("expected_delivery_date"),
-                total_amount=float(data.get("total_amount", 0)),
-                currency=str(data.get("currency", "USD")),
+                total_amount=self._required_amount(data, "total_amount"),
+                currency=self._required_currency(data),
                 line_items=self._parse_line_items(data),
                 billing_address=data.get("billing_address"),
                 shipping_address=data.get("shipping_address"),
@@ -388,6 +463,8 @@ class ExtractionEngine:
                 contract_reference=data.get("contract_reference"),
                 notes=data.get("notes"),
             )
+        except ExtractionError:
+            raise
         except Exception as e:
             raise ExtractionError(f"PO validation failed: {str(e)}")
 

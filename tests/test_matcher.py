@@ -216,6 +216,116 @@ class TestLineItemValidation:
         assert any(i.rule == "total_sum" for i in issues)
 
 
+
+    def test_invoice_po_total_mismatch_fails_match(self, matcher):
+        from core.models import PurchaseOrderSchema
+
+        invoice = InvoiceSchema(
+            vendor_name="Acme Corp",
+            invoice_number="INV-1",
+            invoice_date="2024-01-15",
+            total_amount=1200,
+            currency="USD",
+        )
+        po = PurchaseOrderSchema(
+            po_number="PO-1",
+            vendor_name="Acme Corp",
+            order_date="2024-01-10",
+            total_amount=1000,
+            currency="USD",
+        )
+
+        result = matcher._match_invoice_po(invoice, po)
+
+        assert result.passed is False
+        assert any(issue.rule == "total_match" for issue in result.issues)
+
+    def test_invoice_po_vendor_mismatch_fails_match(self, matcher):
+        from core.models import PurchaseOrderSchema
+
+        invoice = InvoiceSchema(
+            vendor_name="Acme Corp",
+            invoice_number="INV-2",
+            invoice_date="2024-01-15",
+            total_amount=1000,
+            currency="USD",
+        )
+        po = PurchaseOrderSchema(
+            po_number="PO-2",
+            vendor_name="Other Supplier",
+            order_date="2024-01-10",
+            total_amount=1000,
+            currency="USD",
+        )
+
+        result = matcher._match_invoice_po(invoice, po)
+
+        assert result.passed is False
+        assert any(issue.rule == "vendor_match" for issue in result.issues)
+
+    def test_invoice_po_currency_mismatch_fails_match(self, matcher):
+        from core.models import PurchaseOrderSchema
+
+        invoice = InvoiceSchema(
+            vendor_name="Acme Corp",
+            invoice_number="INV-3",
+            invoice_date="2024-01-15",
+            total_amount=1000,
+            currency="USD",
+        )
+        po = PurchaseOrderSchema(
+            po_number="PO-3",
+            vendor_name="Acme Corp",
+            order_date="2024-01-10",
+            total_amount=1000,
+            currency="EUR",
+        )
+
+        result = matcher._match_invoice_po(invoice, po)
+
+        assert result.passed is False
+        assert any(issue.rule == "currency_match" for issue in result.issues)
+
+
+
+    def test_duplicate_invoice_lines_cannot_reuse_one_po_line(self, matcher):
+        from core.models import PurchaseOrderSchema
+
+        invoice = InvoiceSchema(
+            vendor_name="Acme Corp",
+            invoice_number="INV-DUP",
+            invoice_date="2024-01-15",
+            total_amount=200,
+            currency="USD",
+            line_items=[
+                LineItem(
+                    description="Consulting", quantity=1, unit_price=100, total=100
+                ),
+                __import__("core.models", fromlist=["LineItem"]).LineItem(
+                    description="Consulting", quantity=1, unit_price=100, total=100
+                ),
+            ],
+        )
+        po = PurchaseOrderSchema(
+            po_number="PO-DUP",
+            vendor_name="Acme Corp",
+            order_date="2024-01-10",
+            total_amount=100,
+            currency="USD",
+            line_items=[
+                __import__("core.models", fromlist=["LineItem"]).LineItem(
+                    description="Consulting", quantity=1, unit_price=100, total=100
+                ),
+            ],
+        )
+
+        issues = matcher._compare_line_items(
+            invoice.line_items, po.line_items, "invoice_po"
+        )
+
+        assert sum(issue.rule == "line_item_not_found" for issue in issues) == 1
+
+
 class TestDateParsing:
     """Test cases for date parsing."""
 

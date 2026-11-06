@@ -27,9 +27,16 @@ from fastapi.responses import Response
 
 from config import settings
 from core.database import Database
+from core.exceptions import StoreError
+from core.extraction import ExtractionError
 from core.demo import load_demo_data
 from core.export import export_results_excel
-from core.services import BatchService, DocumentService, MatchService
+from core.services import (
+    BatchService,
+    DocumentProcessingError,
+    DocumentService,
+    MatchService,
+)
 from core.services.batch_service import BatchFile
 
 from .dependencies import (
@@ -40,6 +47,7 @@ from .dependencies import (
     get_matcher,
     get_vector_store,
     get_po_store,
+    require_api_key,
 )
 from .schemas import (
     BatchErrorDetail,
@@ -62,7 +70,7 @@ from .schemas import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api", dependencies=[Depends(require_api_key)])
 
 UPLOAD_CHUNK_SIZE = 1024 * 1024
 
@@ -254,6 +262,9 @@ def ingest_contract(
             ),
         )
 
+    except (DocumentProcessingError, StoreError):
+        save_path.unlink(missing_ok=True)
+        raise
     except Exception:
         save_path.unlink(missing_ok=True)
         logger.exception("Contract ingestion failed")
@@ -318,6 +329,9 @@ def ingest_po(
             ),
         )
 
+    except (DocumentProcessingError, ExtractionError, StoreError):
+        save_path.unlink(missing_ok=True)
+        raise
     except Exception:
         save_path.unlink(missing_ok=True)
         logger.exception("Purchase order ingestion failed")
@@ -418,6 +432,9 @@ def process_invoice(
             ),
         )
 
+    except (DocumentProcessingError, ExtractionError):
+        save_path.unlink(missing_ok=True)
+        raise
     except Exception:
         save_path.unlink(missing_ok=True)
         logger.exception("Invoice processing failed")

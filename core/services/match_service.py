@@ -177,17 +177,28 @@ class MatchService:
                     candidates=1,
                 )
             logger.warning(
-                f"Invoice references PO '{invoice.po_number}' but not found in store"
+                f"Invoice references PO '{invoice.po_number}' but not found in store; "
+                "refusing to substitute a different PO automatically"
             )
+            # An explicit but unresolved PO reference is a control exception.
+            # Do not silently replace it with a different PO based on amount.
+            return POMatchResult(candidates=0)
 
-        # Strategy 2: Fuzzy match on vendor_name + total_amount
+        # Strategy 2: Fuzzy match only when the invoice has no PO reference.
         vendor_pos = self.po_store.get_pos_by_vendor(invoice.vendor_name)
         if not vendor_pos:
             return POMatchResult(candidates=0)
 
         # Filter by amount tolerance
         matches = []
+        invoice_currency = invoice.currency.strip().upper()
+        invoice_vendor = invoice.vendor_name.strip().casefold()
         for po in vendor_pos:
+            # Never compare monetary amounts across currencies or vendors.
+            if po.currency.strip().upper() != invoice_currency:
+                continue
+            if po.vendor_name.strip().casefold() != invoice_vendor:
+                continue
             if invoice.total_amount == 0 and po.total_amount == 0:
                 matches.append(po)
             elif invoice.total_amount > 0:
