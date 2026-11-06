@@ -279,36 +279,28 @@ class BatchService:
                 return
             self.database.update_job_status(job_id, "MATCHING")
 
-            # Check previously saved results before recording this invoice.
-            # A duplicate identity is a review signal, not a fraud conclusion.
-            duplicate = self.database.find_duplicate_invoice(
-                vendor_name=invoice.vendor_name,
-                invoice_number=invoice.invoice_number,
-                exclude_job_id=job_id,
-            )
-
+            # Validate first, then atomically check identity and persist.
+            # SQLite's write reservation prevents concurrent workers from
+            # both recording the same vendor/invoice identity as a first hit.
             result = self.match_service.validate_three_way(
                 invoice, po_number=batch_file.po_number
             )
 
-            stored_status = "REVIEW" if duplicate else result.status
             result_details = {
                 "total_amount": invoice.total_amount,
                 "currency": invoice.currency,
                 "po_number": batch_file.po_number or invoice.po_number,
                 "issues_count": len(result.all_issues),
                 "validation_status_before_duplicate_check": result.status,
-                "duplicate_invoice_candidate": duplicate,
             }
 
-            # Save result to database. Preserve the matching outcome separately
-            # so reviewers can distinguish a duplicate flag from match failures.
-            self.database.save_result(
+            # Duplicate candidates are routed to REVIEW, never labelled fraud.
+            self.database.save_result_with_duplicate_check(
                 job_id=job_id,
                 invoice_file=file_path,
                 vendor_name=invoice.vendor_name,
                 invoice_number=invoice.invoice_number,
-                status=stored_status,
+                status=result.status,
                 confidence=result.overall_score,
                 matches_passed=result.matches_passed,
                 total_matches=result.total_matches,
