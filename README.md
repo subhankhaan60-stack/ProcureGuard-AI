@@ -154,6 +154,24 @@ values against the original document before approval. The current schema records
 the pending state; reviewer identity, approval actions, immutable decision history,
 and field-level page citations are not yet implemented.
 
+## Vendor Bank-Detail Change Monitoring
+
+The SQLite metadata store can register a vendor's bank identity and compare later
+updates. A changed keyed fingerprint creates a `vendor_bank_details_changed`
+audit event and returns `REVIEW`; it is a warning for a human verifier, not a
+fraud finding or payment authorization. The stored profile contains the bank
+name, account suffix (last four digits), and an opaque fingerprint—not a full
+account or routing number.
+
+The caller must calculate `account_fingerprint` as an HMAC over consistently
+normalized bank details, using a secret held outside the database and source
+control. Do not pass raw account/routing numbers to this method. Plain hashes
+are not a substitute for HMAC. The current implementation provides the
+database-level registration and change-detection primitive; it does not yet
+provide a vendor-facing workflow, reviewer identity, approval/rejection action,
+or payment-system block. If the HMAC secret is unavailable or changes, do not
+silently register a new baseline—require controlled re-verification.
+
 ## Evaluation Results
 
 The matching engine is evaluated against 12 synthetic scenarios covering exact matches, partial matches, and full mismatches. Run `python evals/run_evaluation.py` to reproduce.
