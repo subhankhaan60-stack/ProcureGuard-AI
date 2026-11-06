@@ -242,6 +242,51 @@ class TestResultOperations:
         passed = db.get_results(status="PASS")
         assert len(passed) == 2
 
+    def test_find_duplicate_invoice_matches_vendor_and_number_case_insensitively(self, db):
+        job = db.create_job(job_type="invoice_process")
+        db.save_result(
+            job_id=job.id,
+            invoice_file="first.pdf",
+            vendor_name=" Acme Corp ",
+            invoice_number=" inv-001 ",
+            status="PASS",
+        )
+
+        duplicate = db.find_duplicate_invoice("acme corp", "INV-001")
+
+        assert duplicate is not None
+        assert duplicate["job_id"] == job.id
+        assert duplicate["invoice_file"] == "first.pdf"
+        assert duplicate["vendor_name"] == " Acme Corp "
+        assert duplicate["invoice_number"] == " inv-001 "
+
+    def test_find_duplicate_invoice_does_not_match_different_vendor_or_number(self, db):
+        job = db.create_job(job_type="invoice_process")
+        db.save_result(
+            job_id=job.id,
+            vendor_name="Acme Corp",
+            invoice_number="INV-001",
+        )
+
+        assert db.find_duplicate_invoice("Other Vendor", "INV-001") is None
+        assert db.find_duplicate_invoice("Acme Corp", "INV-002") is None
+
+    def test_find_duplicate_invoice_can_exclude_current_job(self, db):
+        job = db.create_job(job_type="invoice_process")
+        db.save_result(
+            job_id=job.id,
+            vendor_name="Acme Corp",
+            invoice_number="INV-001",
+        )
+
+        assert db.find_duplicate_invoice(
+            "Acme Corp", "INV-001", exclude_job_id=job.id
+        ) is None
+
+    def test_find_duplicate_invoice_ignores_blank_identity_fields(self, db):
+        assert db.find_duplicate_invoice("", "INV-001") is None
+        assert db.find_duplicate_invoice("Acme Corp", "   ") is None
+
     def test_job_result_cascade_delete(self, db):
         """Deleting a job should delete its results."""
         job = db.create_job(job_type="invoice_process")
