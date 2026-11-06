@@ -6,6 +6,8 @@ Uses temp directories so each test gets a fresh database.
 """
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 import pytest
 from pathlib import Path
 
@@ -408,6 +410,32 @@ class TestStats:
 
 class TestConcurrency:
     """Tests for concurrent access patterns."""
+
+    def test_concurrent_duplicate_identity_is_serialized(self, db):
+        """Only the first concurrent save may be stored without REVIEW."""
+        jobs = [
+            db.create_job(job_type="invoice_process"),
+            db.create_job(job_type="invoice_process"),
+        ]
+        barrier = Barrier(2)
+
+        def save(job):
+            barrier.wait(timeout=5)
+            return db.save_result_with_duplicate_check(
+                job_id=job.id,
+                invoice_file=f"{job.id}.pdf",
+                vendor_name="Acme Corp",
+                invoice_number="INV-RACE-001",
+                status="PASS",
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(save, jobs))
+
+        statuses = sorted(result.status for result, _ in results)
+        assert statuses == ["PASS", "REVIEW"]
+        assert sum(duplicate is not None for _, duplicate in results) == 1
+        assert len(db.get_results()) == 2
 
     def test_multiple_sessions(self, db):
         """Multiple sessions should work without conflicts (WAL mode)."""
