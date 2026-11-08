@@ -203,6 +203,33 @@ curl -H "X-API-Key: $API_AUTH_TOKEN" \\
   "http://localhost:8000/api/payments?vendor_name=Acme%20Corp"
 ```
 
+## Payment Beneficiary Bank-Profile Checks
+
+The authenticated endpoint `GET /api/risk/payment-bank-mismatches` compares a
+payment record's supplied keyed bank-account fingerprint with the currently
+registered vendor bank profile. A mismatch is returned as `REVIEW`, with the
+registered bank name and account suffix as supporting context. The raw
+fingerprints are never returned.
+
+This check only works when both a payment record fingerprint and a registered
+vendor baseline exist. Missing fingerprints or missing baselines are not
+evidence of a match; those records cannot be compared by this rule. A mismatch
+may result from a legitimate bank-detail update or an incorrect/stale source
+record. Verify beneficiary details through an independently trusted contact
+channel before any payment action.
+
+The endpoint is read-only. It does not change the vendor baseline, block,
+approve, execute, or reverse a payment, and a mismatch is not proof of fraud.
+The caller remains responsible for generating fingerprints with a keyed HMAC
+and protecting the HMAC secret outside the database and source control.
+
+Example:
+
+```bash
+curl -H "X-API-Key: $API_AUTH_TOKEN" \\
+  "http://localhost:8000/api/risk/payment-bank-mismatches"
+```
+
 ## Payment Duplicate Review Indicators
 
 The authenticated read-only endpoint `GET /api/risk/payment-duplicates`
