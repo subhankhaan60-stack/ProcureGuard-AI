@@ -287,3 +287,11 @@ DocuMatch/
 ## License
 
 MIT
+
+
+## Procurement Risk Indicators
+
+The authenticated API endpoint `GET /api/risk/invoice-patterns` identifies repeated same-vendor, same-amount, same-currency invoice references in a configurable processing-time window. It returns the supporting result IDs and invoice references for human review.
+
+This is an invoice-pattern indicator only. The current data model does not store actual payment transactions, payment dates, payment approvals, or payment execution records; therefore this feature does not claim to detect suspicious payments. Repeated amounts can be legitimate recurring billing. The default window is 7 days and the default minimum is 3 distinct invoice references; both can be configured in the request. The window is based on result processing timestamps, not extracted invoice dates.
+
