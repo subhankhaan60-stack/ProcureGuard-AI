@@ -423,6 +423,86 @@ class TestInvoiceProcess:
         assert v["issues"][0]["severity"] == "critical"
 
 
+class TestPaymentsAPI:
+    def test_create_payment_records_pending_review(self, client, mock_database):
+        mock_database.create_payment_record.return_value = {
+            "id": 7,
+            "vendor_name": "Acme Corp",
+            "invoice_number": "INV-200",
+            "invoice_result_id": 12,
+            "payment_reference": "BANK-REF-001",
+            "amount": "1250.50",
+            "currency": "USD",
+            "payment_date": "2026-11-08",
+            "source": "MANUAL",
+            "status": "PENDING_REVIEW",
+            "created_at": "2026-11-08T12:00:00+00:00",
+        }
+
+        response = client.post(
+            "/api/payments",
+            json={
+                "vendor_name": "Acme Corp",
+                "invoice_result_id": 12,
+                "payment_reference": "BANK-REF-001",
+                "amount": "1250.50",
+                "currency": "usd",
+                "payment_date": "2026-11-08",
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "PENDING_REVIEW"
+        assert data["amount"] == "1250.50"
+        assert data["currency"] == "USD"
+        assert "bank_account_fingerprint" not in data
+        mock_database.create_payment_record.assert_called_once()
+
+    def test_create_payment_rejects_invalid_amount(self, client):
+        response = client.post(
+            "/api/payments",
+            json={"vendor_name": "Acme Corp", "amount": "0", "currency": "USD"},
+        )
+        assert response.status_code == 422
+
+    def test_create_payment_maps_link_validation_to_422(self, client, mock_database):
+        mock_database.create_payment_record.side_effect = ValueError(
+            "Linked invoice result was not found."
+        )
+        response = client.post(
+            "/api/payments",
+            json={
+                "vendor_name": "Acme Corp",
+                "invoice_result_id": 999,
+                "amount": "100.00",
+                "currency": "USD",
+            },
+        )
+        assert response.status_code == 422
+
+    def test_list_payments(self, client, mock_database):
+        mock_database.list_payment_records.return_value = [{
+            "id": 1,
+            "vendor_name": "Acme Corp",
+            "invoice_number": None,
+            "invoice_result_id": None,
+            "payment_reference": None,
+            "amount": "100.00",
+            "currency": "USD",
+            "payment_date": None,
+            "source": "MANUAL",
+            "status": "PENDING_REVIEW",
+            "created_at": "2026-11-08T12:00:00+00:00",
+        }]
+        response = client.get("/api/payments?vendor_name=Acme&limit=10")
+        assert response.status_code == 200
+        assert response.json()[0]["status"] == "PENDING_REVIEW"
+        mock_database.list_payment_records.assert_called_once_with(
+            vendor_name="Acme", status=None, limit=10,
+        )
+
+
 # ==================== HEALTH CHECK ====================
 
 
