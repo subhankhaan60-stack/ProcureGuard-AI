@@ -203,6 +203,32 @@ curl -H "X-API-Key: $API_AUTH_TOKEN" \\
   "http://localhost:8000/api/payments?vendor_name=Acme%20Corp"
 ```
 
+
+## Consolidated Payment Review Queue
+
+The authenticated read-only endpoint `GET /api/risk/payment-review-queue`
+returns pending payment records together with risk indicators from the duplicate
+payment and vendor bank-profile mismatch checks. Each pending record includes
+`risk_flags` and `risk_review_required` so a reviewer can prioritize records
+with one or more indicators.
+
+Optional filters include `vendor_name` and `limit` (1–500). The response also
+includes the underlying findings for context. A record with no returned flags
+is not guaranteed to be safe; it only means these specific checks did not
+return an indicator for that record.
+
+The endpoint is read-only. It does not approve, block, execute, or reverse
+payments. Risk indicators are not proof of fraud, and `REVIEWED_CLEAR` is not
+a bank instruction or proof of organizational approval. Reviewer identity
+and role-based authorization remain outside the current shared-API-key model.
+
+Example:
+
+```bash
+curl -H "X-API-Key: $API_AUTH_TOKEN" \\
+  "http://localhost:8000/api/risk/payment-review-queue?limit=100"
+```
+
 ## Payment Beneficiary Bank-Profile Checks
 
 The authenticated endpoint `GET /api/risk/payment-bank-mismatches` compares a
