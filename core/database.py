@@ -27,7 +27,8 @@ Job State Machine:
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Optional
 
@@ -37,6 +38,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    Numeric,
     String,
     Text,
     create_engine,
@@ -131,6 +133,25 @@ class VendorBankProfile(Base):
     account_last4 = Column(String(4), nullable=False)
     account_fingerprint = Column(String(128), nullable=False)
     updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class Payment(Base):
+    """A recorded payment instruction or payment event; never stores raw bank details."""
+
+    __tablename__ = "payments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    vendor_name = Column(String(255), nullable=False, index=True)
+    invoice_number = Column(String(100), nullable=True, index=True)
+    invoice_result_id = Column(Integer, ForeignKey("results.id"), nullable=True, index=True)
+    payment_reference = Column(String(150), nullable=True, index=True)
+    amount = Column(Numeric(18, 2), nullable=False)
+    currency = Column(String(3), nullable=False)
+    payment_date = Column(DateTime, nullable=True)
+    bank_account_fingerprint = Column(String(128), nullable=True)
+    source = Column(String(20), nullable=False, default="MANUAL")
+    status = Column(String(30), nullable=False, default="PENDING_REVIEW")
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
 class AuditLog(Base):
@@ -658,6 +679,141 @@ class Database:
                 "previous": previous if changed else None,
                 "current": {"bank_name": bank, "account_last4": last4},
             }
+
+    # ==================== PAYMENT RECORDS ====================
+
+    def create_payment_record(
+        self,
+        vendor_name: str,
+        amount,
+        currency: str,
+        invoice_number: Optional[str] = None,
+        invoice_result_id: Optional[int] = None,
+        payment_reference: Optional[str] = None,
+        payment_date: Optional[date | datetime] = None,
+        bank_account_fingerprint: Optional[str] = None,
+        source: str = "MANUAL",
+    ) -> dict:
+        """
+        Record payment data for review. This does not execute or authorize payment.
+
+        Raw bank account details are never accepted; callers may supply only an
+        opaque keyed fingerprint generated outside this database.
+        """
+        name = (vendor_name or "").strip()
+        currency_code = (currency or "").strip().upper()
+        source_value = (source or "").strip().upper()
+        invoice_ref = (invoice_number or "").strip() or None
+        payment_ref = (payment_reference or "").strip() or None
+        fingerprint = (bank_account_fingerprint or "").strip() or None
+        try:
+            amount_value = Decimal(str(amount))
+        except (InvalidOperation, TypeError, ValueError):
+            raise ValueError("Payment amount must be a valid positive number.")
+        if not amount_value.is_finite() or amount_value <= 0:
+            raise ValueError("Payment amount must be a valid positive number.")
+        if amount_value.as_tuple().exponent < -2:
+            raise ValueError("Payment amount may have no more than two decimal places.")
+        if not name:
+            raise ValueError("Vendor name is required.")
+        if len(currency_code) != 3 or not currency_code.isascii() or not currency_code.isalpha():
+            raise ValueError("Currency must be a three-letter ISO-style code.")
+        if source_value not in ("MANUAL", "IMPORT"):
+            raise ValueError("Payment source must be MANUAL or IMPORT.")
+        if payment_ref and len(payment_ref) > 150:
+            raise ValueError("Payment reference must be 150 characters or fewer.")
+        if fingerprint and len(fingerprint) > 128:
+            raise ValueError("Bank account fingerprint must be 128 characters or fewer.")
+
+        if isinstance(payment_date, datetime):
+            payment_datetime = payment_date
+        elif isinstance(payment_date, date):
+            payment_datetime = datetime.combine(payment_date, time.min, tzinfo=timezone.utc)
+        else:
+            payment_datetime = None
+
+        with self.session() as session:
+            linked_result = None
+            if invoice_result_id is not None:
+                if invoice_result_id <= 0:
+                    raise ValueError("invoice_result_id must be a positive integer.")
+                linked_result = session.get(Result, invoice_result_id)
+                if linked_result is None:
+                    raise ValueError("Linked invoice result was not found.")
+                if (linked_result.vendor_name or "").strip().casefold() != name.casefold():
+                    raise ValueError("Payment vendor does not match the linked invoice vendor.")
+                if invoice_ref and (linked_result.invoice_number or "").strip().casefold() != invoice_ref.casefold():
+                    raise ValueError("Payment invoice number does not match the linked invoice result.")
+                if not invoice_ref:
+                    invoice_ref = linked_result.invoice_number
+
+            payment = Payment(
+                vendor_name=name,
+                invoice_number=invoice_ref,
+                invoice_result_id=invoice_result_id,
+                payment_reference=payment_ref,
+                amount=amount_value,
+                currency=currency_code,
+                payment_date=payment_datetime,
+                bank_account_fingerprint=fingerprint,
+                source=source_value,
+                status="PENDING_REVIEW",
+            )
+            session.add(payment)
+            session.flush()
+            self._audit(session, "payment_recorded", "payment", str(payment.id), {
+                "vendor_name": name,
+                "invoice_number": invoice_ref,
+                "invoice_result_id": invoice_result_id,
+                "amount": format(amount_value, ".2f"),
+                "currency": currency_code,
+                "source": source_value,
+                "status": "PENDING_REVIEW",
+                "bank_fingerprint_supplied": fingerprint is not None,
+                "payment_authorized": False,
+            })
+            session.commit()
+            session.refresh(payment)
+            return self._payment_dict(payment)
+
+    @staticmethod
+    def _payment_dict(payment: Payment) -> dict:
+        return {
+            "id": payment.id,
+            "vendor_name": payment.vendor_name,
+            "invoice_number": payment.invoice_number,
+            "invoice_result_id": payment.invoice_result_id,
+            "payment_reference": payment.payment_reference,
+            "amount": format(payment.amount, ".2f"),
+            "currency": payment.currency,
+            "payment_date": payment.payment_date.date().isoformat() if payment.payment_date else None,
+            "source": payment.source,
+            "status": payment.status,
+            "created_at": payment.created_at.isoformat() if payment.created_at else None,
+        }
+
+    def list_payment_records(
+        self,
+        vendor_name: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """List recorded payment data; does not imply payment execution."""
+        if not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500.")
+        with self.session() as session:
+            query = session.query(Payment)
+            if vendor_name and vendor_name.strip():
+                query = query.filter(
+                    func.upper(func.trim(Payment.vendor_name)) == vendor_name.strip().upper()
+                )
+            if status:
+                status_value = status.strip().upper()
+                if status_value != "PENDING_REVIEW":
+                    raise ValueError("Only PENDING_REVIEW payment records are currently supported.")
+                query = query.filter(Payment.status == status_value)
+            payments = query.order_by(Payment.created_at.desc(), Payment.id.desc()).limit(limit).all()
+            return [self._payment_dict(payment) for payment in payments]
 
     # ==================== AUDIT OPERATIONS ====================
 
