@@ -140,6 +140,14 @@ class PaymentCreateRequest(BaseModel):
     source: str = Field(default="MANUAL", pattern=r"^(?i:MANUAL|IMPORT)$")
 
 
+class PaymentReviewRequest(BaseModel):
+    """Human review disposition; does not authorize or execute a transfer."""
+
+    decision: str = Field(pattern=r"^(?i:CLEAR|REJECT)$")
+    reviewer_reference: str = Field(min_length=1, max_length=128)
+    note: str = Field(min_length=1, max_length=1000)
+
+
 class PaymentResponse(BaseModel):
     """Recorded payment data, with no implication of payment authorization."""
 
