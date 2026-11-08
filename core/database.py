@@ -154,6 +154,19 @@ class Payment(Base):
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
+class PaymentReviewEvent(Base):
+    """Append-only record of a human review disposition for a payment entry."""
+
+    __tablename__ = "payment_review_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    payment_id = Column(Integer, ForeignKey("payments.id"), nullable=False, index=True)
+    decision = Column(String(30), nullable=False)
+    reviewer_reference = Column(String(128), nullable=False)
+    note = Column(Text, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
 class AuditLog(Base):
     """Audit trail for significant system actions."""
 
@@ -814,6 +827,89 @@ class Database:
                 query = query.filter(Payment.status == status_value)
             payments = query.order_by(Payment.created_at.desc(), Payment.id.desc()).limit(limit).all()
             return [self._payment_dict(payment) for payment in payments]
+
+    def review_payment_record(
+        self,
+        payment_id: int,
+        decision: str,
+        reviewer_reference: str,
+        note: str,
+    ) -> dict:
+        """
+        Record a review disposition. This is not a bank instruction or transfer.
+
+        Reviewer reference is caller-supplied metadata; the shared API key does
+        not authenticate an individual reviewer or enforce segregation of duties.
+        """
+        decision_value = (decision or "").strip().upper()
+        reviewer_value = (reviewer_reference or "").strip()
+        note_value = (note or "").strip()
+        if payment_id <= 0:
+            raise ValueError("payment_id must be a positive integer.")
+        if decision_value not in ("CLEAR", "REJECT"):
+            raise ValueError("decision must be CLEAR or REJECT.")
+        if not reviewer_value or len(reviewer_value) > 128:
+            raise ValueError("reviewer_reference is required and must be 128 characters or fewer.")
+        if not note_value or len(note_value) > 1000:
+            raise ValueError("A review note is required and must be 1000 characters or fewer.")
+
+        final_status = "REVIEWED_CLEAR" if decision_value == "CLEAR" else "REVIEWED_REJECTED"
+        with self.session() as session:
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            payment = session.get(Payment, payment_id)
+            if payment is None:
+                raise ValueError("Payment record was not found.")
+            if payment.status != "PENDING_REVIEW":
+                raise ValueError("Only PENDING_REVIEW payment records can receive a review decision.")
+
+            payment.status = final_status
+            event = PaymentReviewEvent(
+                payment_id=payment.id,
+                decision=decision_value,
+                reviewer_reference=reviewer_value,
+                note=note_value,
+            )
+            session.add(event)
+            session.flush()
+            self._audit(session, "payment_review_recorded", "payment", str(payment.id), {
+                "review_event_id": event.id,
+                "decision": decision_value,
+                "reviewer_reference": reviewer_value,
+                "status": final_status,
+                "payment_execution_authorized": False,
+            })
+            session.commit()
+            session.refresh(payment)
+            return {
+                "payment": self._payment_dict(payment),
+                "review": {
+                    "id": event.id,
+                    "payment_id": event.payment_id,
+                    "decision": event.decision,
+                    "reviewer_reference": event.reviewer_reference,
+                    "note": event.note,
+                    "created_at": event.created_at.isoformat() if event.created_at else None,
+                },
+                "payment_execution_authorized": False,
+            }
+
+    def list_payment_review_events(self, payment_id: int) -> list[dict]:
+        if payment_id <= 0:
+            raise ValueError("payment_id must be a positive integer.")
+        with self.session() as session:
+            if session.get(Payment, payment_id) is None:
+                raise ValueError("Payment record was not found.")
+            events = session.query(PaymentReviewEvent).filter(
+                PaymentReviewEvent.payment_id == payment_id
+            ).order_by(PaymentReviewEvent.created_at.asc(), PaymentReviewEvent.id.asc()).all()
+            return [{
+                "id": event.id,
+                "payment_id": event.payment_id,
+                "decision": event.decision,
+                "reviewer_reference": event.reviewer_reference,
+                "note": event.note,
+                "created_at": event.created_at.isoformat() if event.created_at else None,
+            } for event in events]
 
     def find_payment_bank_profile_mismatches(
         self,
