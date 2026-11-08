@@ -532,6 +532,37 @@ class TestPaymentsAPI:
         assert response.status_code == 422
 
 
+    def test_payment_bank_mismatch_endpoint_returns_review_indicator(self, client, mock_database):
+        mock_database.find_payment_bank_profile_mismatches.return_value = [{
+            "rule": "payment_bank_profile_mismatch",
+            "status": "REVIEW",
+            "payment_id": 9,
+            "vendor_name": "Acme Corp",
+            "registered_bank_name": "Example Bank",
+            "registered_account_last4": "1234",
+            "payment_authorized": False,
+        }]
+        response = client.get(
+            "/api/risk/payment-bank-mismatches?vendor_name=Acme&limit=5"
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["analysis_type"] == "payment_bank_profile_mismatch_review"
+        assert data["finding_count"] == 1
+        assert data["findings"][0]["status"] == "REVIEW"
+        assert "does not block" in data["disclaimer"]
+        mock_database.find_payment_bank_profile_mismatches.assert_called_once_with(
+            vendor_name="Acme", limit=5,
+        )
+
+    def test_payment_bank_mismatch_endpoint_maps_invalid_limit_to_422(
+        self, client, mock_database
+    ):
+        response = client.get("/api/risk/payment-bank-mismatches?limit=0")
+        assert response.status_code == 422
+        mock_database.find_payment_bank_profile_mismatches.assert_not_called()
+
+
 # ==================== HEALTH CHECK ====================
 
 
