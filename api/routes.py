@@ -626,6 +626,36 @@ def list_payments(
 
 
 @router.get(
+    "/risk/payment-bank-mismatches",
+    summary="Find payment records with changed vendor bank fingerprints",
+    description="Compares supplied payment fingerprints with registered vendor profiles. Results require independent human verification and do not block or authorize payments.",
+)
+def get_payment_bank_mismatches(
+    vendor_name: str | None = Query(None, min_length=1, max_length=255),
+    limit: int = Query(100, ge=1, le=500),
+    db: Database = Depends(get_database),
+):
+    try:
+        findings = db.find_payment_bank_profile_mismatches(
+            vendor_name=vendor_name,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "analysis_type": "payment_bank_profile_mismatch_review",
+        "finding_count": len(findings),
+        "findings": findings,
+        "disclaimer": (
+            "Fingerprint mismatches are review indicators, not proof of fraud. "
+            "Verify beneficiary details through an independently trusted channel. "
+            "This endpoint does not block, authorize, execute, or reverse payments. "
+            "Records without a fingerprint or registered baseline cannot be compared."
+        ),
+    }
+
+
+@router.get(
     "/risk/payment-duplicates",
     summary="Find possible duplicate payment records",
     description="Returns candidate duplicate indicators for human review; it does not block, reverse, or authorize payments.",
