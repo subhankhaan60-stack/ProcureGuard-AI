@@ -545,3 +545,32 @@ class TestSuspiciousInvoicePatterns:
         with pytest.raises(ValueError):
             db.find_suspicious_invoice_patterns(min_occurrences=1)
 
+
+
+class TestResultEvidence:
+    def test_get_result_evidence_returns_stored_details(self, db):
+        job = db.create_job(job_type="invoice_process")
+        result = db.save_result(
+            job_id=job.id,
+            vendor_name="Acme Corp",
+            invoice_number="INV-100",
+            status="REVIEW",
+            details={
+                "risk_explanation": {
+                    "summary": "One warning requires review.",
+                    "severity_counts": {"critical": 0, "error": 0, "warning": 1, "info": 0},
+                },
+                "issue_evidence": [{"rule": "price_variance", "severity": "warning"}],
+            },
+        )
+        evidence = db.get_result_evidence(result.id)
+        assert evidence["result_id"] == result.id
+        assert evidence["details"]["risk_explanation"]["severity_counts"]["warning"] == 1
+        assert evidence["details"]["issue_evidence"][0]["rule"] == "price_variance"
+
+    def test_get_result_evidence_returns_none_for_unknown_id(self, db):
+        assert db.get_result_evidence(999999) is None
+
+    def test_get_result_evidence_rejects_non_positive_id(self, db):
+        assert db.get_result_evidence(0) is None
+
