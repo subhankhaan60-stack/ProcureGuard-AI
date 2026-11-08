@@ -668,6 +668,77 @@ def list_payment_reviews(
 
 
 @router.get(
+    "/risk/payment-review-queue",
+    summary="Build a payment review queue from pending records and risk indicators",
+    description=(
+        "Combines pending payment records with duplicate and vendor bank-profile "
+        "review indicators. It is read-only and does not approve, block, or execute payments."
+    ),
+)
+def get_payment_review_queue(
+    vendor_name: str | None = Query(None, min_length=1, max_length=255),
+    limit: int = Query(100, ge=1, le=500),
+    db: Database = Depends(get_database),
+):
+    try:
+        pending = db.list_payment_records(
+            vendor_name=vendor_name,
+            status="PENDING_REVIEW",
+            limit=limit,
+        )
+        duplicate_findings = db.find_duplicate_payment_candidates(
+            vendor_name=vendor_name,
+            limit=limit,
+        )
+        bank_findings = db.find_payment_bank_profile_mismatches(
+            vendor_name=vendor_name,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    flags_by_payment: dict[int, list[str]] = {}
+    for finding in duplicate_findings:
+        for payment_id in finding.get("payment_ids", []):
+            flags_by_payment.setdefault(payment_id, []).append(
+                finding.get("rule", "duplicate_payment_candidate")
+            )
+    for finding in bank_findings:
+        payment_id = finding.get("payment_id")
+        if payment_id is not None:
+            flags_by_payment.setdefault(payment_id, []).append(
+                finding.get("rule", "vendor_bank_profile_mismatch")
+            )
+
+    queue = []
+    for payment in pending:
+        payment_id = payment.get("id")
+        flags = sorted(set(flags_by_payment.get(payment_id, [])))
+        queue.append({
+            **payment,
+            "risk_flags": flags,
+            "risk_review_required": bool(flags),
+        })
+
+    return {
+        "queue_type": "pending_payment_human_review",
+        "record_count": len(queue),
+        "flagged_count": sum(1 for item in queue if item["risk_review_required"]),
+        "records": queue,
+        "risk_findings": {
+            "duplicate_payment_candidates": duplicate_findings,
+            "vendor_bank_profile_mismatches": bank_findings,
+        },
+        "disclaimer": (
+            "Risk flags are indicators for human verification, not proof of fraud. "
+            "This read-only queue does not approve, block, execute, or reverse payments. "
+            "A payment record marked REVIEWED_CLEAR is not a bank instruction or proof "
+            "of organizational approval."
+        ),
+    }
+
+
+@router.get(
     "/risk/payment-bank-mismatches",
     summary="Find payment records with changed vendor bank fingerprints",
     description="Compares supplied payment fingerprints with registered vendor profiles. Results require independent human verification and do not block or authorize payments.",
