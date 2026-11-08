@@ -649,7 +649,8 @@ def get_payment_duplicate_candidates(
         "disclaimer": (
             "Candidate indicators only. Repeated invoice payments may be legitimate "
             "installments, and payment references may be reused. Human verification "
-            "is required; no payment is blocked, reversed, or authorized."
+            "is required; payments are not blocked or authorized, and none are "
+            "reversed by this endpoint."
         ),
     }
 
