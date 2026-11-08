@@ -678,11 +678,11 @@ class TestDuplicatePaymentCandidates:
             amount="100.00", currency="USD", payment_reference="REF-1",
         )
         db.create_payment_record(
-            vendor_name="Other Corp", invoice_number="INV-1",
+            vendor_name="Other Corp", invoice_number="INV-2",
             amount="100.00", currency="USD", payment_reference="REF-2",
         )
         db.create_payment_record(
-            vendor_name="Acme Corp", invoice_number="INV-1",
+            vendor_name="Acme Corp", invoice_number="INV-3",
             amount="100.00", currency="EUR", payment_reference="REF-3",
         )
         db.create_payment_record(
