@@ -503,6 +503,35 @@ class TestPaymentsAPI:
         )
 
 
+    def test_payment_duplicate_risk_endpoint_returns_review_indicators(self, client, mock_database):
+        mock_database.find_duplicate_payment_candidates.return_value = [{
+            "rule": "duplicate_payment_reference",
+            "status": "REVIEW",
+            "vendor_name": "Acme Corp",
+            "occurrences": 2,
+            "payment_ids": [1, 2],
+            "evidence": [{"payment_id": 1}, {"payment_id": 2}],
+            "explanation": "Verify the repeated payment reference.",
+        }]
+        response = client.get("/api/risk/payment-duplicates?vendor_name=Acme&limit=10")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["analysis_type"] == "payment_duplicate_review"
+        assert data["finding_count"] == 1
+        assert data["findings"][0]["status"] == "REVIEW"
+        assert "not blocked" in data["disclaimer"]
+        mock_database.find_duplicate_payment_candidates.assert_called_once_with(
+            vendor_name="Acme", limit=10,
+        )
+
+    def test_payment_duplicate_risk_endpoint_maps_invalid_filter_to_422(self, client, mock_database):
+        mock_database.find_duplicate_payment_candidates.side_effect = ValueError(
+            "limit must be between 1 and 500."
+        )
+        response = client.get("/api/risk/payment-duplicates?limit=0")
+        assert response.status_code == 422
+
+
 # ==================== HEALTH CHECK ====================
 
 
