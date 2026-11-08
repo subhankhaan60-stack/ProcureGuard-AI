@@ -5,6 +5,8 @@ These are API-specific Pydantic models, separate from internal core models.
 This allows the API contract to evolve independently from internal data structures.
 """
 
+from datetime import date
+from decimal import Decimal
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -119,6 +121,39 @@ class HealthResponse(BaseModel):
 
     status: str = Field(description="healthy, degraded, or unhealthy")
     components: dict[str, ComponentHealth]
+
+
+# ==================== PAYMENTS ====================
+
+
+class PaymentCreateRequest(BaseModel):
+    """Record payment data for review; this request never executes a payment."""
+
+    vendor_name: str = Field(min_length=1, max_length=255)
+    amount: Decimal = Field(gt=0, max_digits=18, decimal_places=2)
+    currency: str = Field(min_length=3, max_length=3, pattern=r"^[A-Za-z]{3}$")
+    invoice_number: Optional[str] = Field(None, max_length=100)
+    invoice_result_id: Optional[int] = Field(None, ge=1)
+    payment_reference: Optional[str] = Field(None, max_length=150)
+    payment_date: Optional[date] = None
+    bank_account_fingerprint: Optional[str] = Field(None, max_length=128)
+    source: str = Field(default="MANUAL", pattern=r"^(?i:MANUAL|IMPORT)$")
+
+
+class PaymentResponse(BaseModel):
+    """Recorded payment data, with no implication of payment authorization."""
+
+    id: int
+    vendor_name: str
+    invoice_number: Optional[str] = None
+    invoice_result_id: Optional[int] = None
+    payment_reference: Optional[str] = None
+    amount: Decimal
+    currency: str
+    payment_date: Optional[str] = None
+    source: str
+    status: str
+    created_at: Optional[str] = None
 
 
 # ==================== RESULTS ====================
