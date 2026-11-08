@@ -63,6 +63,7 @@ from .schemas import (
     ParseInfo,
     POIngestResponse,
     PaymentCreateRequest,
+    PaymentReviewRequest,
     PaymentResponse,
     ResultResponse,
     StatsResponse,
@@ -623,6 +624,47 @@ def list_payments(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post(
+    "/payments/{payment_id}/review",
+    summary="Record a human review disposition for a payment record",
+    description=(
+        "Records CLEAR or REJECT with a note. This does not authorize, execute, "
+        "block, or reverse a bank transfer. Reviewer reference is caller-supplied."
+    ),
+)
+def review_payment(
+    payment_id: int,
+    payload: PaymentReviewRequest,
+    db: Database = Depends(get_database),
+):
+    try:
+        return db.review_payment_record(
+            payment_id=payment_id,
+            decision=payload.decision,
+            reviewer_reference=payload.reviewer_reference,
+            note=payload.note,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 409 if "Only PENDING_REVIEW" in message else 422
+        raise HTTPException(status_code=status_code, detail=message) from exc
+
+
+@router.get(
+    "/payments/{payment_id}/reviews",
+    summary="List review history for a payment record",
+)
+def list_payment_reviews(
+    payment_id: int,
+    db: Database = Depends(get_database),
+):
+    try:
+        return db.list_payment_review_events(payment_id)
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 422
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
 
 @router.get(
