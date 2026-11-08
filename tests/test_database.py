@@ -640,6 +640,81 @@ class TestPaymentRecords:
             db.list_payment_records(status="EXECUTED")
 
 
+
+class TestDuplicatePaymentCandidates:
+    def test_flags_repeated_payment_reference_for_same_vendor_and_currency(self, db):
+        for _ in range(2):
+            db.create_payment_record(
+                vendor_name="Acme Corp", payment_reference="BANK-REF-9",
+                amount="100.00", currency="USD",
+            )
+        findings = db.find_duplicate_payment_candidates()
+        reference_findings = [
+            item for item in findings if item["rule"] == "duplicate_payment_reference"
+        ]
+        assert len(reference_findings) == 1
+        assert reference_findings[0]["status"] == "REVIEW"
+        assert reference_findings[0]["occurrences"] == 2
+        assert len(reference_findings[0]["payment_ids"]) == 2
+
+    def test_flags_same_invoice_amount_and_currency_recorded_twice(self, db):
+        for _ in range(2):
+            db.create_payment_record(
+                vendor_name="Acme Corp", invoice_number="INV-55",
+                amount="250.00", currency="USD",
+            )
+        findings = db.find_duplicate_payment_candidates()
+        invoice_findings = [
+            item for item in findings if item["rule"] == "repeated_invoice_payment"
+        ]
+        assert len(invoice_findings) == 1
+        assert invoice_findings[0]["invoice_number"] == "INV-55"
+        assert invoice_findings[0]["amount"] == "250.00"
+        assert invoice_findings[0]["occurrences"] == 2
+
+    def test_does_not_group_different_vendor_currency_or_invoice_amount(self, db):
+        db.create_payment_record(
+            vendor_name="Acme Corp", invoice_number="INV-1",
+            amount="100.00", currency="USD", payment_reference="REF-1",
+        )
+        db.create_payment_record(
+            vendor_name="Other Corp", invoice_number="INV-1",
+            amount="100.00", currency="USD", payment_reference="REF-1",
+        )
+        db.create_payment_record(
+            vendor_name="Acme Corp", invoice_number="INV-1",
+            amount="100.00", currency="EUR", payment_reference="REF-1",
+        )
+        db.create_payment_record(
+            vendor_name="Acme Corp", invoice_number="INV-1",
+            amount="101.00", currency="USD", payment_reference="REF-1",
+        )
+        # Same reference is only compared within vendor and currency; invoice
+        # amount rule additionally requires the same amount.
+        findings = db.find_duplicate_payment_candidates()
+        assert not any(
+            item["rule"] == "repeated_invoice_payment" for item in findings
+        )
+        assert not any(
+            item["rule"] == "duplicate_payment_reference"
+            and item["vendor_name"] == "Acme Corp"
+            and item["currency"] == "USD"
+            for item in findings
+        )
+
+    def test_vendor_filter_and_limit_validation(self, db):
+        for vendor in ("Acme Corp", "Other Corp"):
+            for _ in range(2):
+                db.create_payment_record(
+                    vendor_name=vendor, payment_reference="SAME-REF",
+                    amount="10.00", currency="USD",
+                )
+        findings = db.find_duplicate_payment_candidates(vendor_name="acme corp")
+        assert all(item["vendor_name"] == "Acme Corp" for item in findings)
+        with pytest.raises(ValueError):
+            db.find_duplicate_payment_candidates(limit=0)
+
+
 class TestResultEvidence:
     def test_get_result_evidence_returns_stored_details(self, db):
         job = db.create_job(job_type="invoice_process")
