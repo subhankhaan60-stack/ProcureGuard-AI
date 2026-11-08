@@ -384,3 +384,25 @@ This is an invoice-pattern indicator only. The current data model does not store
 - The extraction pipeline does not yet retain reliable source page numbers, so the feature does not claim page-level traceability. Evidence is limited to data returned by the current parser and matcher.
 - A risk explanation is an aid to human review, not a fraud determination or payment approval.
 
+
+
+## Payment Human Review Dispositions
+
+The authenticated API supports a one-time human review disposition for a payment
+record that is still `PENDING_REVIEW`:
+
+- `POST /api/payments/{payment_id}/review` with `decision: CLEAR` or `REJECT`,
+  a reviewer reference, and a non-empty explanation.
+- The payment record becomes `REVIEWED_CLEAR` or `REVIEWED_REJECTED`.
+- `GET /api/payments/{payment_id}/reviews` returns the recorded review history.
+- Each decision creates a separate review-event row and an audit-log event.
+  A second decision cannot overwrite the first through this endpoint.
+
+A `CLEAR` disposition means only that the supplied reviewer marked the record
+clear at this review stage. It is **not** a bank instruction, payment execution,
+or proof that all required organizational approvals have been obtained.
+The current shared API-key authentication does not establish an individual's
+identity or enforce segregation of duties; `reviewer_reference` is caller-
+supplied metadata and must not be treated as verified identity. Production use
+requires individual authenticated accounts, role-based permissions, and
+independent approval controls.
