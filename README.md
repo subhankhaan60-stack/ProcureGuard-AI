@@ -172,6 +172,43 @@ provide a vendor-facing workflow, reviewer identity, approval/rejection action,
 or payment-system block. If the HMAC secret is unavailable or changes, do not
 silently register a new baseline—require controlled re-verification.
 
+## Payment Records (Initial Data-Capture Layer)
+
+Payment data is stored separately from invoice validation results. The
+authenticated API provides:
+
+- `POST /api/payments` to record a payment entry.
+- `GET /api/payments` to list entries, optionally filtered by vendor and status.
+
+New records always start as `PENDING_REVIEW`. The initial layer supports
+manual entry or imported payment data, positive amounts with up to two decimal
+places, a three-letter currency code, optional payment date/reference, and an
+optional link to a previously stored invoice result. When an invoice result is
+linked, the vendor and any supplied invoice number must match that result.
+
+The database stores an opaque keyed bank-account fingerprint only when the
+caller supplies one; it does not accept or return raw bank account details.
+Payment amounts use fixed-precision decimal storage. Each record creates an
+audit event.
+
+Example:
+
+```bash
+curl -X POST http://localhost:8000/api/payments \\
+  -H "X-API-Key: $API_AUTH_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"vendor_name":"Acme Corp","invoice_number":"INV-200","amount":"1250.50","currency":"USD","payment_reference":"BANK-REF-001","source":"MANUAL"}'
+
+curl -H "X-API-Key: $API_AUTH_TOKEN" \\
+  "http://localhost:8000/api/payments?vendor_name=Acme%20Corp"
+```
+
+**Important limitations:** this is payment-data capture only. It does not connect
+to a bank, initiate or execute transfers, reconcile bank statements, approve or
+reject payments, or enforce segregation of duties. `PENDING_REVIEW` is a
+recording status—not proof that a payment is blocked or authorized. Payment
+risk rules and a reviewer decision workflow are separate future milestones.
+
 ## Evaluation Results
 
 The matching engine is evaluated against 12 synthetic scenarios covering exact matches, partial matches, and full mismatches. Run `python evals/run_evaluation.py` to reproduce.
@@ -199,7 +236,7 @@ The matching engine is evaluated against 12 synthetic scenarios covering exact m
 | Batch Processing | Process 100 invoices concurrently with per-file error isolation |
 | REST API | 8 endpoints with OpenAPI docs, proper error codes (422/502/503) |
 | Analytics Dashboard | KPI cards, Plotly charts, filterable results table |
-| Audit Trail | Every action logged to SQLite with timestamps |
+| Audit Trail | Every action logged to SQLite with timestamps |\n| Payment Records | Separate payment-data register with review status and invoice linkage |
 | 100% Offline | No data leaves your machine -- local LLMs + local vector DB |
 
 ## Tech Stack
