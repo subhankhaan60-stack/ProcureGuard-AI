@@ -742,3 +742,66 @@ class TestResultEvidence:
     def test_get_result_evidence_rejects_non_positive_id(self, db):
         assert db.get_result_evidence(0) is None
 
+
+
+
+class TestPaymentBankProfileMismatch:
+    def test_flags_payment_fingerprint_different_from_registered_profile(self, db):
+        db.record_vendor_bank_details(
+            "Acme Corp", "Example Bank", "1234", "hmac:registered"
+        )
+        db.create_payment_record(
+            vendor_name="Acme Corp", amount="500.00", currency="USD",
+            payment_reference="PAY-001",
+            bank_account_fingerprint="hmac:unrecognized",
+        )
+        findings = db.find_payment_bank_profile_mismatches()
+        assert len(findings) == 1
+        finding = findings[0]
+        assert finding["rule"] == "payment_bank_profile_mismatch"
+        assert finding["status"] == "REVIEW"
+        assert finding["registered_bank_name"] == "Example Bank"
+        assert finding["registered_account_last4"] == "1234"
+        assert finding["payment_authorized"] is False
+        assert "hmac:" not in json.dumps(finding)
+
+    def test_matching_fingerprint_is_not_flagged(self, db):
+        db.record_vendor_bank_details(
+            "Acme Corp", "Example Bank", "1234", "hmac:same"
+        )
+        db.create_payment_record(
+            vendor_name="Acme Corp", amount="500.00", currency="USD",
+            bank_account_fingerprint="hmac:same",
+        )
+        assert db.find_payment_bank_profile_mismatches() == []
+
+    def test_missing_profile_or_payment_fingerprint_is_not_compared(self, db):
+        db.record_vendor_bank_details(
+            "Acme Corp", "Example Bank", "1234", "hmac:registered"
+        )
+        db.create_payment_record(
+            vendor_name="Acme Corp", amount="500.00", currency="USD"
+        )
+        db.create_payment_record(
+            vendor_name="Other Corp", amount="700.00", currency="USD",
+            bank_account_fingerprint="hmac:unknown",
+        )
+        assert db.find_payment_bank_profile_mismatches() == []
+
+    def test_vendor_filter_and_limit_validation(self, db):
+        db.record_vendor_bank_details(
+            "Acme Corp", "Example Bank", "1234", "hmac:registered"
+        )
+        db.record_vendor_bank_details(
+            "Other Corp", "Other Bank", "5678", "hmac:registered-2"
+        )
+        for vendor in ("Acme Corp", "Other Corp"):
+            db.create_payment_record(
+                vendor_name=vendor, amount="10.00", currency="USD",
+                bank_account_fingerprint="hmac:changed",
+            )
+        findings = db.find_payment_bank_profile_mismatches(vendor_name="acme corp")
+        assert len(findings) == 1
+        assert findings[0]["vendor_name"] == "Acme Corp"
+        with pytest.raises(ValueError):
+            db.find_payment_bank_profile_mismatches(limit=0)
