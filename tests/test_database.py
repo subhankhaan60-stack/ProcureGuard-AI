@@ -639,6 +639,47 @@ class TestPaymentRecords:
         with pytest.raises(ValueError):
             db.list_payment_records(status="EXECUTED")
 
+    def test_records_clear_review_and_preserves_review_history(self, db):
+        payment = db.create_payment_record(
+            vendor_name="Acme Corp", amount="125.00", currency="USD"
+        )
+        result = db.review_payment_record(
+            payment_id=payment["id"],
+            decision="CLEAR",
+            reviewer_reference="reviewer-01",
+            note="Invoice and supporting documents independently checked.",
+        )
+        assert result["payment"]["status"] == "REVIEWED_CLEAR"
+        assert result["payment_execution_authorized"] is False
+        assert result["review"]["decision"] == "CLEAR"
+        history = db.list_payment_review_events(payment["id"])
+        assert len(history) == 1
+        assert history[0]["reviewer_reference"] == "reviewer-01"
+
+    def test_rejects_second_review_decision_and_invalid_review_data(self, db):
+        payment = db.create_payment_record(
+            vendor_name="Acme Corp", amount="125.00", currency="USD"
+        )
+        db.review_payment_record(
+            payment_id=payment["id"], decision="REJECT",
+            reviewer_reference="reviewer-02", note="Beneficiary mismatch.",
+        )
+        with pytest.raises(ValueError, match="Only PENDING_REVIEW"):
+            db.review_payment_record(
+                payment_id=payment["id"], decision="CLEAR",
+                reviewer_reference="reviewer-03", note="Changed mind.",
+            )
+        with pytest.raises(ValueError):
+            db.review_payment_record(
+                payment_id=999, decision="CLEAR",
+                reviewer_reference="reviewer-03", note="Not found.",
+            )
+        with pytest.raises(ValueError):
+            db.review_payment_record(
+                payment_id=payment["id"], decision="CLEAR",
+                reviewer_reference="", note="Missing reviewer.",
+            )
+
 
 
 class TestDuplicatePaymentCandidates:
