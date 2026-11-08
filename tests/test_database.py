@@ -501,3 +501,47 @@ class TestVendorBankDetailMonitoring:
             db.record_vendor_bank_details(
                 "Acme Corp", "Example Bank", "12345", "hmac-v1:initial"
             )
+
+
+class TestSuspiciousInvoicePatterns:
+    def test_finds_repeated_same_vendor_amount_distinct_invoice_numbers(self, db):
+        for number in ("INV-A", "INV-B", "INV-C"):
+            job = db.create_job(job_type="invoice_process")
+            db.save_result(
+                job_id=job.id,
+                vendor_name="Acme Corp",
+                invoice_number=number,
+                status="PASS",
+                details={"total_amount": 1250.00, "currency": "USD"},
+            )
+        findings = db.find_suspicious_invoice_patterns()
+        assert len(findings) == 1
+        assert findings[0]["rule"] == "repeated_same_vendor_amount"
+        assert findings[0]["occurrences"] == 3
+        assert {item["invoice_number"] for item in findings[0]["evidence"]} == {"INV-A", "INV-B", "INV-C"}
+        assert findings[0]["status"] == "REVIEW"
+
+    def test_does_not_flag_different_currency_or_amount(self, db):
+        for number, amount, currency in (
+            ("INV-A", 100, "USD"),
+            ("INV-B", 100, "EUR"),
+            ("INV-C", 101, "USD"),
+        ):
+            job = db.create_job(job_type="invoice_process")
+            db.save_result(job_id=job.id, vendor_name="Acme", invoice_number=number,
+                           details={"total_amount": amount, "currency": currency})
+        assert db.find_suspicious_invoice_patterns() == []
+
+    def test_same_invoice_identity_does_not_inflate_pattern_count(self, db):
+        job = db.create_job(job_type="invoice_process")
+        for _ in range(3):
+            db.save_result(job_id=job.id, vendor_name="Acme", invoice_number="INV-1",
+                           details={"total_amount": 100, "currency": "USD"})
+        assert db.find_suspicious_invoice_patterns() == []
+
+    def test_validates_detection_parameters(self, db):
+        with pytest.raises(ValueError):
+            db.find_suspicious_invoice_patterns(lookback_days=0)
+        with pytest.raises(ValueError):
+            db.find_suspicious_invoice_patterns(min_occurrences=1)
+
