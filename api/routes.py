@@ -62,6 +62,8 @@ from .schemas import (
     MatchDetailResponse,
     ParseInfo,
     POIngestResponse,
+    PaymentCreateRequest,
+    PaymentResponse,
     ResultResponse,
     StatsResponse,
     ValidationIssueResponse,
@@ -583,6 +585,44 @@ def get_results(
 
 
 # ==================== STATISTICS ====================
+
+
+@router.post(
+    "/payments",
+    response_model=PaymentResponse,
+    summary="Record payment data for human review",
+    description="Stores a payment record in PENDING_REVIEW. This endpoint does not approve, execute, or authorize payment.",
+)
+def create_payment(
+    payload: PaymentCreateRequest,
+    db: Database = Depends(get_database),
+):
+    try:
+        return db.create_payment_record(**payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get(
+    "/payments",
+    response_model=list[PaymentResponse],
+    summary="List recorded payment data",
+    description="Returns recorded payment entries. PENDING_REVIEW is the only supported status in this initial release.",
+)
+def list_payments(
+    vendor_name: str | None = Query(None, min_length=1, max_length=255),
+    status: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+    db: Database = Depends(get_database),
+):
+    try:
+        return db.list_payment_records(
+            vendor_name=vendor_name,
+            status=status,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get(
