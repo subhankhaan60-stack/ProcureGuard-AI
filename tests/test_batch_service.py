@@ -199,8 +199,11 @@ class TestProcessSingleFile:
         assert duplicate["job_id"] == previous_job.id
         assert duplicate["invoice_number"] == "INV-001"
 
-        # A duplicate flag is a review outcome; it does not label the vendor fraudulent.
-        assert "fraud" not in str(current.details).lower()
+        # The result must explicitly remain a review indicator, not a fraud conclusion.
+        explanation = current.details["risk_explanation"]
+        assert explanation["human_review_required"] is True
+        assert any("not a fraud conclusion" in item for item in explanation["limitations"])
+        assert "fraud" not in str(duplicate).lower()
 
     def test_processing_error_isolates_failure(self, batch_service, db, mock_doc_service):
         """A processing error should mark the job as FAILED, not crash."""
