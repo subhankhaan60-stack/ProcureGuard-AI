@@ -583,6 +583,61 @@ class TestPaymentsAPI:
         mock_database.find_payment_bank_profile_mismatches.assert_not_called()
 
 
+    def test_payment_review_queue_combines_pending_records_and_risk_flags(
+        self, client, mock_database
+    ):
+        mock_database.list_payment_records.return_value = [
+            {"id": 1, "vendor_name": "Acme Corp", "status": "PENDING_REVIEW"},
+            {"id": 2, "vendor_name": "Other Corp", "status": "PENDING_REVIEW"},
+        ]
+        mock_database.find_duplicate_payment_candidates.return_value = [
+            {"rule": "duplicate_payment_reference", "payment_ids": [1, 3]}
+        ]
+        mock_database.find_payment_bank_profile_mismatches.return_value = [
+            {"rule": "payment_bank_profile_mismatch", "payment_id": 2}
+        ]
+
+        response = client.get("/api/risk/payment-review-queue?limit=20")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["record_count"] == 2
+        assert data["flagged_count"] == 2
+        assert data["records"][0]["risk_flags"] == ["duplicate_payment_reference"]
+        assert data["records"][0]["risk_review_required"] is True
+        assert data["records"][1]["risk_flags"] == ["payment_bank_profile_mismatch"]
+        assert data["records"][1]["risk_review_required"] is True
+        assert "does not approve" in data["disclaimer"]
+        mock_database.list_payment_records.assert_called_once_with(
+            vendor_name=None, status="PENDING_REVIEW", limit=20
+        )
+
+    def test_payment_review_queue_marks_unflagged_pending_records(
+        self, client, mock_database
+    ):
+        mock_database.list_payment_records.return_value = [
+            {"id": 8, "vendor_name": "Vendor Z", "status": "PENDING_REVIEW"}
+        ]
+        mock_database.find_duplicate_payment_candidates.return_value = []
+        mock_database.find_payment_bank_profile_mismatches.return_value = []
+
+        response = client.get("/api/risk/payment-review-queue")
+
+        assert response.status_code == 200
+        record = response.json()["records"][0]
+        assert record["risk_flags"] == []
+        assert record["risk_review_required"] is False
+
+    def test_payment_review_queue_maps_database_validation_errors_to_422(
+        self, client, mock_database
+    ):
+        mock_database.list_payment_records.side_effect = ValueError(
+            "limit must be between 1 and 500."
+        )
+        response = client.get("/api/risk/payment-review-queue?limit=0")
+        assert response.status_code == 422
+
+
 # ==================== HEALTH CHECK ====================
 
 
