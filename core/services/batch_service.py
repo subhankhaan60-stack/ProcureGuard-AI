@@ -286,12 +286,40 @@ class BatchService:
                 invoice, po_number=batch_file.po_number
             )
 
+            issue_evidence = [
+                issue.model_dump(mode="json")
+                for issue in result.all_issues
+            ]
+            matched_clause_evidence = [
+                clause.model_dump(mode="json")
+                for clause in result.matched_clauses
+            ]
+            severity_counts = {
+                severity: sum(1 for issue in result.all_issues if issue.severity == severity)
+                for severity in ("critical", "error", "warning", "info")
+            }
             result_details = {
                 "total_amount": invoice.total_amount,
                 "currency": invoice.currency,
                 "po_number": batch_file.po_number or invoice.po_number,
                 "issues_count": len(result.all_issues),
                 "validation_status_before_duplicate_check": result.status,
+                "risk_explanation": {
+                    "status": result.status,
+                    "summary": (
+                        f"{len(result.all_issues)} validation issue(s) were identified; "
+                        f"{severity_counts['critical']} critical, {severity_counts['error']} error, "
+                        f"{severity_counts['warning']} warning, and {severity_counts['info']} informational."
+                    ),
+                    "severity_counts": severity_counts,
+                    "human_review_required": result.status in ("FAIL", "REVIEW") or bool(result.all_issues),
+                    "limitations": [
+                        "Findings are indicators for human review, not a fraud conclusion.",
+                        "Source page numbers are not currently retained by the extraction pipeline.",
+                    ],
+                },
+                "issue_evidence": issue_evidence,
+                "matched_clause_evidence": matched_clause_evidence,
             }
 
             # Duplicate candidates are routed to REVIEW, never labelled fraud.
