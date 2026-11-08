@@ -626,6 +626,35 @@ def list_payments(
 
 
 @router.get(
+    "/risk/payment-duplicates",
+    summary="Find possible duplicate payment records",
+    description="Returns candidate duplicate indicators for human review; it does not block, reverse, or authorize payments.",
+)
+def get_payment_duplicate_candidates(
+    vendor_name: str | None = Query(None, min_length=1, max_length=255),
+    limit: int = Query(100, ge=1, le=500),
+    db: Database = Depends(get_database),
+):
+    try:
+        findings = db.find_duplicate_payment_candidates(
+            vendor_name=vendor_name,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "analysis_type": "payment_duplicate_review",
+        "finding_count": len(findings),
+        "findings": findings,
+        "disclaimer": (
+            "Candidate indicators only. Repeated invoice payments may be legitimate "
+            "installments, and payment references may be reused. Human verification "
+            "is required; no payment is blocked, reversed, or authorized."
+        ),
+    }
+
+
+@router.get(
     "/results/{result_id}/evidence",
     summary="Retrieve validation explanation and supporting evidence",
 )
