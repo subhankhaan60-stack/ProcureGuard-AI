@@ -467,6 +467,94 @@ class Database:
                 "created_at": result.created_at.isoformat() if result.created_at else None,
             }
 
+    def find_suspicious_invoice_patterns(
+        self,
+        lookback_days: int = 7,
+        min_occurrences: int = 3,
+        vendor_name: Optional[str] = None,
+    ) -> list[dict]:
+        """
+        Find repeated same-value invoices for a vendor within a processing window.
+
+        This is a review indicator, not a fraud conclusion. The time window is
+        based on result processing timestamps because invoice dates are not
+        persisted as first-class result columns.
+        """
+        if not 1 <= lookback_days <= 365:
+            raise ValueError("lookback_days must be between 1 and 365.")
+        if not 2 <= min_occurrences <= 20:
+            raise ValueError("min_occurrences must be between 2 and 20.")
+
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=lookback_days)
+        with self.session() as session:
+            query = session.query(Result).filter(
+                Result.created_at >= cutoff,
+                Result.vendor_name.isnot(None),
+                Result.invoice_number.isnot(None),
+            )
+            if vendor_name and vendor_name.strip():
+                query = query.filter(
+                    func.upper(func.trim(Result.vendor_name)) == vendor_name.strip().upper()
+                )
+            rows = query.order_by(Result.created_at.asc(), Result.id.asc()).all()
+
+        groups = {}
+        for row in rows:
+            details = row.details or {}
+            amount = details.get("total_amount")
+            currency = details.get("currency")
+            if amount is None or not currency:
+                continue
+            try:
+                amount_value = round(float(amount), 2)
+            except (TypeError, ValueError):
+                continue
+            if amount_value <= 0:
+                continue
+            vendor_key = (row.vendor_name or "").strip().casefold()
+            invoice_key = (row.invoice_number or "").strip().casefold()
+            if not vendor_key or not invoice_key:
+                continue
+            key = (vendor_key, amount_value, str(currency).strip().upper())
+            groups.setdefault(key, {})
+            # Repeated processing of the same invoice identity is already
+            # handled by duplicate detection; only distinct references count here.
+            groups[key].setdefault(invoice_key, row)
+
+        findings = []
+        for (_, amount, currency), invoices in groups.items():
+            if len(invoices) < min_occurrences:
+                continue
+            records = sorted(invoices.values(), key=lambda item: item.created_at)
+            findings.append({
+                "rule": "repeated_same_vendor_amount",
+                "status": "REVIEW",
+                "vendor_name": records[0].vendor_name,
+                "amount": amount,
+                "currency": currency,
+                "occurrences": len(records),
+                "lookback_days": lookback_days,
+                "first_processed_at": records[0].created_at.isoformat() if records[0].created_at else None,
+                "last_processed_at": records[-1].created_at.isoformat() if records[-1].created_at else None,
+                "evidence": [
+                    {
+                        "result_id": item.id,
+                        "job_id": item.job_id,
+                        "invoice_number": item.invoice_number,
+                        "processed_at": item.created_at.isoformat() if item.created_at else None,
+                        "validation_status": item.status,
+                    }
+                    for item in records
+                ],
+                "explanation": (
+                    "Multiple distinct invoice references from this vendor have "
+                    "the same amount and currency within the selected processing window. "
+                    "This may be legitimate recurring billing and requires human review."
+                ),
+            })
+        return sorted(findings, key=lambda item: (-item["occurrences"], item["vendor_name"].casefold()))
+
     # ==================== VENDOR BANK-DETAIL MONITORING ====================
 
     def record_vendor_bank_details(
