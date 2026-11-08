@@ -815,6 +815,113 @@ class Database:
             payments = query.order_by(Payment.created_at.desc(), Payment.id.desc()).limit(limit).all()
             return [self._payment_dict(payment) for payment in payments]
 
+    def find_duplicate_payment_candidates(
+        self,
+        vendor_name: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """
+        Identify possible duplicate payment records for human review.
+
+        Rules:
+        - Same normalized vendor + currency + non-empty payment reference.
+        - Same normalized vendor + invoice number + amount + currency.
+
+        These are candidate indicators only. Repeated invoice payments may be
+        legitimate installments, and payment references may be reused by some
+        source systems. No record is changed and no fraud conclusion is made.
+        """
+        if not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500.")
+
+        with self.session() as session:
+            query = session.query(Payment)
+            if vendor_name and vendor_name.strip():
+                query = query.filter(
+                    func.upper(func.trim(Payment.vendor_name))
+                    == vendor_name.strip().upper()
+                )
+            # Bound the working set so a large local database cannot cause an
+            # unbounded in-memory scan. Newest records are examined first.
+            payments = query.order_by(
+                Payment.created_at.desc(), Payment.id.desc()
+            ).limit(5000).all()
+
+        groups = {}
+        for payment in payments:
+            vendor_key = (payment.vendor_name or "").strip().casefold()
+            currency = (payment.currency or "").strip().upper()
+            if not vendor_key or not currency:
+                continue
+
+            reference = (payment.payment_reference or "").strip().casefold()
+            if reference:
+                key = ("duplicate_payment_reference", vendor_key, currency, reference)
+                groups.setdefault(key, []).append(payment)
+
+            invoice = (payment.invoice_number or "").strip().casefold()
+            if invoice:
+                amount = Decimal(str(payment.amount)).quantize(Decimal("0.01"))
+                key = (
+                    "repeated_invoice_payment", vendor_key, currency,
+                    invoice, amount,
+                )
+                groups.setdefault(key, []).append(payment)
+
+        findings = []
+        for key, records in groups.items():
+            if len(records) < 2:
+                continue
+            rule = key[0]
+            ordered = sorted(records, key=lambda item: (item.created_at, item.id))
+            first = ordered[0]
+            if rule == "duplicate_payment_reference":
+                explanation = (
+                    "The same non-empty payment reference appears more than once "
+                    "for this vendor and currency. Verify the source statement and "
+                    "bank reference; some source systems may reuse references."
+                )
+            else:
+                explanation = (
+                    "The same vendor, invoice number, amount, and currency appear "
+                    "in multiple payment records. This may represent a duplicate "
+                    "entry or legitimate split/installment payments and requires "
+                    "human verification."
+                )
+            findings.append({
+                "rule": rule,
+                "status": "REVIEW",
+                "vendor_name": first.vendor_name,
+                "invoice_number": first.invoice_number if rule == "repeated_invoice_payment" else None,
+                "amount": format(Decimal(str(first.amount)).quantize(Decimal("0.01")), ".2f")
+                    if rule == "repeated_invoice_payment" else None,
+                "currency": first.currency,
+                "payment_reference": first.payment_reference
+                    if rule == "duplicate_payment_reference" else None,
+                "occurrences": len(records),
+                "payment_ids": [item.id for item in ordered],
+                "evidence": [
+                    {
+                        "payment_id": item.id,
+                        "invoice_number": item.invoice_number,
+                        "payment_reference": item.payment_reference,
+                        "amount": format(Decimal(str(item.amount)).quantize(Decimal("0.01")), ".2f"),
+                        "currency": item.currency,
+                        "payment_date": item.payment_date.date().isoformat()
+                            if item.payment_date else None,
+                        "source": item.source,
+                        "status": item.status,
+                    }
+                    for item in ordered
+                ],
+                "explanation": explanation,
+            })
+
+        findings.sort(
+            key=lambda item: (-item["occurrences"], item["vendor_name"].casefold(), item["rule"])
+        )
+        return findings[:limit]
+
     # ==================== AUDIT OPERATIONS ====================
 
     def _audit(
