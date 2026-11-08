@@ -547,6 +547,99 @@ class TestSuspiciousInvoicePatterns:
 
 
 
+class TestPaymentRecords:
+    def test_records_payment_for_review_and_audits_without_raw_bank_data(self, db):
+        from datetime import date
+
+        job = db.create_job(job_type="invoice_process")
+        invoice = db.save_result(
+            job_id=job.id,
+            vendor_name="Acme Corp",
+            invoice_number="INV-200",
+            status="PASS",
+        )
+        payment = db.create_payment_record(
+            vendor_name="Acme Corp",
+            invoice_result_id=invoice.id,
+            payment_reference="BANK-REF-001",
+            amount="1250.50",
+            currency="usd",
+            payment_date=date(2026, 11, 8),
+            bank_account_fingerprint="opaque-keyed-hmac",
+            source="IMPORT",
+        )
+
+        assert payment["vendor_name"] == "Acme Corp"
+        assert payment["invoice_number"] == "INV-200"
+        assert payment["invoice_result_id"] == invoice.id
+        assert payment["amount"] == "1250.50"
+        assert payment["currency"] == "USD"
+        assert payment["payment_date"] == "2026-11-08"
+        assert payment["source"] == "IMPORT"
+        assert payment["status"] == "PENDING_REVIEW"
+        assert "bank_account_fingerprint" not in payment
+
+        audit = db.get_audit_log(entity_type="payment", limit=5)
+        assert any(
+            entry.action == "payment_recorded"
+            and entry.audit_metadata["payment_authorized"] is False
+            for entry in audit
+        )
+
+    @pytest.mark.parametrize("amount", ["0", "-1", "not-a-number", "12.345"])
+    def test_rejects_invalid_payment_amount(self, db, amount):
+        with pytest.raises(ValueError):
+            db.create_payment_record(
+                vendor_name="Acme Corp", amount=amount, currency="USD"
+            )
+
+    def test_rejects_invalid_currency_and_source(self, db):
+        with pytest.raises(ValueError):
+            db.create_payment_record(
+                vendor_name="Acme Corp", amount="10.00", currency="US"
+            )
+        with pytest.raises(ValueError):
+            db.create_payment_record(
+                vendor_name="Acme Corp", amount="10.00", currency="USD",
+                source="EXECUTED",
+            )
+
+    def test_rejects_missing_or_mismatched_invoice_link(self, db):
+        with pytest.raises(ValueError, match="not found"):
+            db.create_payment_record(
+                vendor_name="Acme Corp", amount="10.00", currency="USD",
+                invoice_result_id=999,
+            )
+
+        job = db.create_job(job_type="invoice_process")
+        invoice = db.save_result(
+            job_id=job.id, vendor_name="Different Vendor",
+            invoice_number="INV-1", status="PASS",
+        )
+        with pytest.raises(ValueError, match="does not match"):
+            db.create_payment_record(
+                vendor_name="Acme Corp", amount="10.00", currency="USD",
+                invoice_result_id=invoice.id,
+            )
+
+    def test_lists_payment_records_with_filters(self, db):
+        db.create_payment_record(
+            vendor_name="Acme Corp", amount="10.00", currency="USD"
+        )
+        db.create_payment_record(
+            vendor_name="Other Corp", amount="20.00", currency="GBP"
+        )
+
+        rows = db.list_payment_records(vendor_name="acme corp")
+        assert len(rows) == 1
+        assert rows[0]["vendor_name"] == "Acme Corp"
+        assert db.list_payment_records(status="PENDING_REVIEW")[0]["status"] == "PENDING_REVIEW"
+
+    def test_rejects_unsupported_payment_status_filter(self, db):
+        with pytest.raises(ValueError):
+            db.list_payment_records(status="EXECUTED")
+
+
 class TestResultEvidence:
     def test_get_result_evidence_returns_stored_details(self, db):
         job = db.create_job(job_type="invoice_process")
