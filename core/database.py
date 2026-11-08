@@ -467,6 +467,24 @@ class Database:
                 "created_at": result.created_at.isoformat() if result.created_at else None,
             }
 
+    def get_result_evidence(self, result_id: int) -> Optional[dict]:
+        """Return stored validation evidence for one result without exposing file contents."""
+        if result_id <= 0:
+            return None
+        with self.session() as session:
+            result = session.get(Result, result_id)
+            if result is None:
+                return None
+            return {
+                "result_id": result.id,
+                "job_id": result.job_id,
+                "vendor_name": result.vendor_name,
+                "invoice_number": result.invoice_number,
+                "status": result.status,
+                "created_at": result.created_at.isoformat() if result.created_at else None,
+                "details": result.details or {},
+            }
+
     def find_suspicious_invoice_patterns(
         self,
         lookback_days: int = 7,
