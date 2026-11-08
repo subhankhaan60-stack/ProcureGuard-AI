@@ -586,6 +586,20 @@ def get_results(
 
 
 @router.get(
+    "/results/{result_id}/evidence",
+    summary="Retrieve validation explanation and supporting evidence",
+)
+def get_result_evidence(
+    result_id: int,
+    db: Database = Depends(get_database),
+):
+    evidence = db.get_result_evidence(result_id)
+    if evidence is None:
+        raise HTTPException(status_code=404, detail="Result not found.")
+    return evidence
+
+
+@router.get(
     "/risk/invoice-patterns",
     summary="Find repeated same-value invoice patterns",
     description="Returns review indicators from stored invoice results; it does not detect or authorize payments.",
