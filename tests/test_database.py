@@ -679,15 +679,15 @@ class TestDuplicatePaymentCandidates:
         )
         db.create_payment_record(
             vendor_name="Other Corp", invoice_number="INV-1",
-            amount="100.00", currency="USD", payment_reference="REF-1",
+            amount="100.00", currency="USD", payment_reference="REF-2",
         )
         db.create_payment_record(
             vendor_name="Acme Corp", invoice_number="INV-1",
-            amount="100.00", currency="EUR", payment_reference="REF-1",
+            amount="100.00", currency="EUR", payment_reference="REF-3",
         )
         db.create_payment_record(
             vendor_name="Acme Corp", invoice_number="INV-1",
-            amount="101.00", currency="USD", payment_reference="REF-1",
+            amount="101.00", currency="USD", payment_reference="REF-4",
         )
         # Same reference is only compared within vendor and currency; invoice
         # amount rule additionally requires the same amount.
