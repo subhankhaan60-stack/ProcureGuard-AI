@@ -815,6 +815,67 @@ class Database:
             payments = query.order_by(Payment.created_at.desc(), Payment.id.desc()).limit(limit).all()
             return [self._payment_dict(payment) for payment in payments]
 
+    def find_payment_bank_profile_mismatches(
+        self,
+        vendor_name: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """
+        Flag recorded payment entries whose supplied keyed bank fingerprint
+        differs from the currently registered vendor bank profile.
+
+        This is a review indicator only. It neither changes the profile nor
+        blocks, authorizes, or executes a payment. Entries without a supplied
+        fingerprint or without a registered baseline cannot be compared.
+        """
+        if not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500.")
+
+        with self.session() as session:
+            query = session.query(Payment, VendorBankProfile).join(
+                VendorBankProfile,
+                func.lower(func.trim(Payment.vendor_name)) == VendorBankProfile.vendor_key,
+            ).filter(
+                Payment.bank_account_fingerprint.isnot(None),
+                Payment.bank_account_fingerprint != "",
+            )
+            if vendor_name and vendor_name.strip():
+                query = query.filter(
+                    func.upper(func.trim(Payment.vendor_name))
+                    == vendor_name.strip().upper()
+                )
+            rows = query.order_by(
+                Payment.created_at.desc(), Payment.id.desc()
+            ).limit(5000).all()
+
+        findings = []
+        for payment, profile in rows:
+            if payment.bank_account_fingerprint == profile.account_fingerprint:
+                continue
+            findings.append({
+                "rule": "payment_bank_profile_mismatch",
+                "status": "REVIEW",
+                "payment_id": payment.id,
+                "vendor_name": payment.vendor_name,
+                "invoice_number": payment.invoice_number,
+                "amount": format(Decimal(str(payment.amount)).quantize(Decimal("0.01")), ".2f"),
+                "currency": payment.currency,
+                "payment_reference": payment.payment_reference,
+                "registered_bank_name": profile.bank_name,
+                "registered_account_last4": profile.account_last4,
+                "profile_updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
+                "explanation": (
+                    "The keyed bank-account fingerprint supplied with this payment "
+                    "record differs from the current registered vendor bank profile. "
+                    "Verify the beneficiary directly using an independently trusted "
+                    "contact channel before any payment action."
+                ),
+                "payment_authorized": False,
+            })
+            if len(findings) >= limit:
+                break
+        return findings
+
     def find_duplicate_payment_candidates(
         self,
         vendor_name: Optional[str] = None,
