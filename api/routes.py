@@ -586,6 +586,33 @@ def get_results(
 
 
 @router.get(
+    "/risk/invoice-patterns",
+    summary="Find repeated same-value invoice patterns",
+    description="Returns review indicators from stored invoice results; it does not detect or authorize payments.",
+)
+def get_invoice_patterns(
+    vendor_name: str | None = Query(None, min_length=1, max_length=255),
+    lookback_days: int = Query(7, ge=1, le=365),
+    min_occurrences: int = Query(3, ge=2, le=20),
+    db: Database = Depends(get_database),
+):
+    findings = db.find_suspicious_invoice_patterns(
+        lookback_days=lookback_days,
+        min_occurrences=min_occurrences,
+        vendor_name=vendor_name,
+    )
+    return {
+        "analysis_type": "invoice_pattern_review",
+        "lookback_basis": "result processing timestamp, not invoice date",
+        "lookback_days": lookback_days,
+        "min_occurrences": min_occurrences,
+        "finding_count": len(findings),
+        "findings": findings,
+        "disclaimer": "Indicators only. Repeated amounts may be legitimate recurring invoices. Human review is required; no payment records or payment authorization are involved.",
+    }
+
+
+@router.get(
     "/stats",
     response_model=StatsResponse,
     summary="Processing statistics",
