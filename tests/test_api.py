@@ -503,6 +503,26 @@ class TestPaymentsAPI:
         )
 
 
+    def test_payment_review_endpoint_records_disposition(self, client, mock_database):
+        mock_database.review_payment_record.return_value = {
+            "payment": {"id": 5, "status": "REVIEWED_CLEAR"},
+            "review": {"id": 1, "payment_id": 5, "decision": "CLEAR"},
+            "payment_execution_authorized": False,
+        }
+        response = client.post("/api/payments/5/review", json={
+            "decision": "CLEAR",
+            "reviewer_reference": "reviewer-01",
+            "note": "Checked supporting documents.",
+        })
+        assert response.status_code == 200
+        assert response.json()["payment_execution_authorized"] is False
+        mock_database.review_payment_record.assert_called_once_with(
+            payment_id=5,
+            decision="CLEAR",
+            reviewer_reference="reviewer-01",
+            note="Checked supporting documents.",
+        )
+
     def test_payment_duplicate_risk_endpoint_returns_review_indicators(self, client, mock_database):
         mock_database.find_duplicate_payment_candidates.return_value = [{
             "rule": "duplicate_payment_reference",
