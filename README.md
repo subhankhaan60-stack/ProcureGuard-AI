@@ -295,3 +295,13 @@ The authenticated API endpoint `GET /api/risk/invoice-patterns` identifies repea
 
 This is an invoice-pattern indicator only. The current data model does not store actual payment transactions, payment dates, payment approvals, or payment execution records; therefore this feature does not claim to detect suspicious payments. Repeated amounts can be legitimate recurring billing. The default window is 7 days and the default minimum is 3 distinct invoice references; both can be configured in the request. The window is based on result processing timestamps, not extracted invoice dates.
 
+
+
+### Validation explanations and evidence
+
+- Stored invoice validation results now include a deterministic severity summary and the serialized validation issues that support it.
+- Matched contract clause snippets and their existing metadata are retained where the matcher supplies them.
+- Retrieve a saved result's explanation and evidence with the authenticated endpoint `GET /api/results/{result_id}/evidence`.
+- The extraction pipeline does not yet retain reliable source page numbers, so the feature does not claim page-level traceability. Evidence is limited to data returned by the current parser and matcher.
+- A risk explanation is an aid to human review, not a fraud determination or payment approval.
+
