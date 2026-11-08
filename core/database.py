@@ -404,6 +404,22 @@ class Database:
             stored_status = "REVIEW" if duplicate else status
             persisted_details = dict(details or {})
             persisted_details["duplicate_invoice_candidate"] = duplicate
+
+            # A duplicate identity changes the persisted decision to REVIEW.
+            # Keep the explanation consistent with that final stored status.
+            if duplicate:
+                risk_explanation = dict(
+                    persisted_details.get("risk_explanation") or {}
+                )
+                risk_explanation["status"] = "REVIEW"
+                risk_explanation["human_review_required"] = True
+                risk_explanation["duplicate_invoice_candidate"] = True
+                risk_explanation["summary"] = (
+                    str(risk_explanation.get("summary", "")).strip()
+                    + " A previously processed vendor/invoice identity was found; "
+                    "human verification is required."
+                ).strip()
+                persisted_details["risk_explanation"] = risk_explanation
             result = Result(
                 job_id=job_id,
                 invoice_file=invoice_file,
