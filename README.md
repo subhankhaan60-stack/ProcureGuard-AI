@@ -203,6 +203,21 @@ curl -H "X-API-Key: $API_AUTH_TOKEN" \\
   "http://localhost:8000/api/payments?vendor_name=Acme%20Corp"
 ```
 
+## Payment Duplicate Review Indicators
+
+The authenticated read-only endpoint `GET /api/risk/payment-duplicates`
+checks stored payment records for two candidate patterns:
+
+- The same non-empty payment reference for the same normalized vendor and currency.
+- The same normalized vendor, invoice number, amount, and currency appearing in multiple payment records.
+
+The endpoint returns the payment record IDs and supporting fields for human
+verification. It does not modify records, block or reverse a transfer, or
+conclude that fraud occurred. Repeated invoice payments can be legitimate
+installments, and some source systems may reuse payment references. The scan
+examines up to the 5,000 most recently recorded payment rows; use a vendor
+filter to narrow a review when appropriate.
+
 **Important limitations:** this is payment-data capture only. It does not connect
 to a bank, initiate or execute transfers, reconcile bank statements, approve or
 reject payments, or enforce segregation of duties. `PENDING_REVIEW` is a
