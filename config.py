@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     ]
     api_docs_enabled: bool = True
     api_auth_token: Optional[str] = None
+    user_session_secret: Optional[str] = None
+    user_session_ttl_seconds: int = 1800
 
     # Three-Way Matching Configuration
     match_tolerance: float = 0.01  # 1% tolerance for amount comparisons
