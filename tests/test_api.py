@@ -900,3 +900,18 @@ class TestUserLoginAPI:
             "email": "reviewer@example.com", "password": "correct-password"
         })
         assert response.status_code == 503
+
+
+    def test_admin_can_create_user_account(self, client, mock_database):
+        mock_database.create_user.return_value = {
+            "id": 8, "email": "preparer@example.com", "full_name": "Preparer",
+            "role": "PREPARER", "is_active": True, "created_at": None,
+        }
+        response = client.post("/api/auth/users", json={
+            "email": "preparer@example.com", "full_name": "Preparer",
+            "password": "a-strong-password-123", "role": "PREPARER",
+        })
+        assert response.status_code == 200
+        assert response.json()["role"] == "PREPARER"
+        assert "password_hash" not in response.json()
+        mock_database.create_user.assert_called_once()
