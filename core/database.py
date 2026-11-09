@@ -166,6 +166,7 @@ class Payment(Base):
     bank_account_fingerprint = Column(String(128), nullable=True)
     source = Column(String(20), nullable=False, default="MANUAL")
     status = Column(String(30), nullable=False, default="PENDING_REVIEW")
+    created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
@@ -257,6 +258,18 @@ class Database:
             if "parent_job_id" not in columns:
                 connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN parent_job_id INTEGER REFERENCES jobs(id)")
                 connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_jobs_parent_job_id ON jobs(parent_job_id)")
+
+            # Backward-compatible migration for payment creator attribution.
+            payment_columns = {
+                row[1] for row in connection.exec_driver_sql("PRAGMA table_info(payments)").fetchall()
+            }
+            if "created_by_user_id" not in payment_columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE payments ADD COLUMN created_by_user_id INTEGER REFERENCES users(id)"
+                )
+                connection.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS ix_payments_created_by_user_id ON payments(created_by_user_id)"
+                )
 
         logger.info(f"Database initialized at {db_path} (WAL mode)")
 
@@ -797,6 +810,7 @@ class Database:
         payment_date: Optional[date | datetime] = None,
         bank_account_fingerprint: Optional[str] = None,
         source: str = "MANUAL",
+        created_by_user_id: Optional[int] = None,
     ) -> dict:
         """
         Record payment data for review. This does not execute or authorize payment.
@@ -862,6 +876,7 @@ class Database:
                 bank_account_fingerprint=fingerprint,
                 source=source_value,
                 status="PENDING_REVIEW",
+                created_by_user_id=created_by_user_id,
             )
             session.add(payment)
             session.flush()
@@ -873,6 +888,7 @@ class Database:
                 "currency": currency_code,
                 "source": source_value,
                 "status": "PENDING_REVIEW",
+                "created_by_user_id": created_by_user_id,
                 "bank_fingerprint_supplied": fingerprint is not None,
                 "payment_authorized": False,
             })
@@ -893,6 +909,7 @@ class Database:
             "payment_date": payment.payment_date.date().isoformat() if payment.payment_date else None,
             "source": payment.source,
             "status": payment.status,
+            "created_by_user_id": payment.created_by_user_id,
             "created_at": payment.created_at.isoformat() if payment.created_at else None,
         }
 
@@ -925,12 +942,13 @@ class Database:
         decision: str,
         reviewer_reference: str,
         note: str,
+        reviewer_user_id: Optional[int] = None,
     ) -> dict:
         """
         Record a review disposition. This is not a bank instruction or transfer.
 
-        Reviewer reference is caller-supplied metadata; the shared API key does
-        not authenticate an individual reviewer or enforce segregation of duties.
+        When authenticated user IDs are available, enforce creator/reviewer
+        separation independently of the display-only email reference.
         """
         decision_value = (decision or "").strip().upper()
         reviewer_value = (reviewer_reference or "").strip()
@@ -952,6 +970,12 @@ class Database:
                 raise ValueError("Payment record was not found.")
             if payment.status != "PENDING_REVIEW":
                 raise ValueError("Only PENDING_REVIEW payment records can receive a review decision.")
+            if (
+                payment.created_by_user_id is not None
+                and reviewer_user_id is not None
+                and payment.created_by_user_id == reviewer_user_id
+            ):
+                raise ValueError("Payment creator cannot review their own payment (segregation of duties).")
 
             payment.status = final_status
             event = PaymentReviewEvent(
@@ -966,6 +990,7 @@ class Database:
                 "review_event_id": event.id,
                 "decision": decision_value,
                 "reviewer_reference": reviewer_value,
+                "reviewer_user_id": reviewer_user_id,
                 "status": final_status,
                 "payment_execution_authorized": False,
             })
