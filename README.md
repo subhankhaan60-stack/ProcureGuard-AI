@@ -481,3 +481,18 @@ or verified email process. Payment creator identity is not yet persisted, so
 segregation-of-duties (preventing a preparer from reviewing their own payment)
 is not yet enforced. The API key is still required alongside bearer tokens.
 This is a development security foundation, not a production security certification.
+
+
+### Account bootstrap and provisioning
+
+On a trusted machine/server console, create the first administrator with:
+
+```bash
+python scripts/create_admin.py
+```
+
+The command refuses to create another initial administrator if an ADMIN account
+already exists, prompts for the password without echoing it, and stores only
+the password hash. After login, an administrator can create additional accounts
+through `POST /api/auth/users`. Do not expose the bootstrap script as a web
+endpoint or run it on an untrusted machine.
