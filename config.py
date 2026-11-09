@@ -5,6 +5,7 @@ Uses pydantic-settings for environment variable loading.
 
 from pathlib import Path
 from typing import Optional
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -57,7 +58,7 @@ class Settings(BaseSettings):
     api_docs_enabled: bool = True
     api_auth_token: Optional[str] = None
     user_session_secret: Optional[str] = None
-    user_session_ttl_seconds: int = 1800
+    user_session_ttl_seconds: int = Field(default=1800, ge=60, le=86400)
 
     # Three-Way Matching Configuration
     match_tolerance: float = 0.01  # 1% tolerance for amount comparisons
