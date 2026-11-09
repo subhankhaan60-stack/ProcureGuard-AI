@@ -175,6 +175,7 @@ class PaymentResponse(BaseModel):
     payment_date: Optional[str] = None
     source: str
     status: str
+    created_by_user_id: Optional[int] = None
     created_at: Optional[str] = None
 
 
