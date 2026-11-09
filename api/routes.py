@@ -563,7 +563,6 @@ def get_results(
     job_id: int | None = Query(None, ge=1),
     limit: int = Query(50, ge=1, le=500),
     db: Database = Depends(get_database),
-    user: dict = Depends(get_current_user),
 ):
     results = db.get_results(
         vendor_name=vendor_name,
@@ -641,6 +640,7 @@ def list_payments(
     status: str | None = Query(None),
     limit: int = Query(50, ge=1, le=500),
     db: Database = Depends(get_database),
+    user: dict = Depends(get_current_user),
 ):
     try:
         return db.list_payment_records(
@@ -657,7 +657,7 @@ def list_payments(
     summary="Record a human review disposition for a payment record",
     description=(
         "Records CLEAR or REJECT with a note. This does not authorize, execute, "
-        "block, or reverse a bank transfer. Reviewer reference is caller-supplied."
+        "block, or reverse a bank transfer. Reviewer identity is taken from the authenticated account."
     ),
 )
 def review_payment(
