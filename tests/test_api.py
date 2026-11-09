@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from api.app import app
-from api.dependencies import get_batch_service, get_database, get_document_service, get_match_service
+from api.dependencies import get_batch_service, get_database, get_document_service, get_match_service, get_current_user
 from core.exceptions import StoreError
 from core.extraction import ExtractionError
 from core.models import (
@@ -72,6 +72,7 @@ def client(mock_doc_service, mock_match_service, mock_batch_service, mock_databa
     app.dependency_overrides[get_match_service] = lambda: mock_match_service
     app.dependency_overrides[get_batch_service] = lambda: mock_batch_service
     app.dependency_overrides[get_database] = lambda: mock_database
+    app.dependency_overrides[get_current_user] = lambda: {"id": 1, "email": "admin@example.com", "full_name": "Test Admin", "role": "ADMIN", "is_active": True}
     yield TestClient(app, headers={"X-API-Key": "test-secret"})
     app.dependency_overrides.clear()
 
