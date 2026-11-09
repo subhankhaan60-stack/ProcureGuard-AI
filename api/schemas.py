@@ -123,6 +123,14 @@ class HealthResponse(BaseModel):
     components: dict[str, ComponentHealth]
 
 
+# ==================== AUTHENTICATION ====================
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=256)
+
+
 # ==================== PAYMENTS ====================
 
 
@@ -144,7 +152,6 @@ class PaymentReviewRequest(BaseModel):
     """Human review disposition; does not authorize or execute a transfer."""
 
     decision: str = Field(pattern=r"^(?i:CLEAR|REJECT)$")
-    reviewer_reference: str = Field(min_length=1, max_length=128)
     note: str = Field(min_length=1, max_length=1000)
 
 
