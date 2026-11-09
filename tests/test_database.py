@@ -846,3 +846,68 @@ class TestPaymentBankProfileMismatch:
         assert findings[0]["vendor_name"] == "Acme Corp"
         with pytest.raises(ValueError):
             db.find_payment_bank_profile_mismatches(limit=0)
+
+
+class TestLocalUserIdentityFoundation:
+    def test_creates_user_with_hashed_password_and_audit_event(self, db):
+        user = db.create_user(
+            email="Reviewer@Example.com",
+            full_name="Test Reviewer",
+            password="a-long-test-password",
+            role="REVIEWER",
+        )
+        assert user["email"] == "reviewer@example.com"
+        assert user["role"] == "REVIEWER"
+        assert "password" not in user
+        assert "password_hash" not in user
+        assert db.authenticate_user(
+            "REVIEWER@example.com", "a-long-test-password"
+        )["id"] == user["id"]
+        assert db.authenticate_user(
+            "reviewer@example.com", "incorrect-password"
+        ) is None
+        audit = db.get_audit_log(entity_type="user", limit=5)
+        assert any(
+            row.action == "user_created" and row.audit_metadata["role"] == "REVIEWER"
+            for row in audit
+        )
+
+    def test_rejects_duplicate_email_and_unsupported_role(self, db):
+        db.create_user(
+            email="admin@example.com", full_name="Admin User",
+            password="another-long-password", role="ADMIN",
+        )
+        with pytest.raises(ValueError, match="already exists"):
+            db.create_user(
+                email="ADMIN@example.com", full_name="Duplicate",
+                password="another-long-password", role="REVIEWER",
+            )
+        with pytest.raises(ValueError, match="role"):
+            db.create_user(
+                email="badrole@example.com", full_name="Bad Role",
+                password="another-long-password", role="SUPERUSER",
+            )
+
+    @pytest.mark.parametrize("password", ["short", "", None])
+    def test_rejects_weak_or_missing_password(self, db, password):
+        with pytest.raises(ValueError, match="Password"):
+            db.create_user(
+                email="new@example.com", full_name="New User",
+                password=password, role="REVIEWER",
+            )
+
+    def test_unknown_user_and_bad_credentials_fail_authentication(self, db):
+        assert db.authenticate_user("missing@example.com", "password") is None
+        assert db.authenticate_user("bad-email", "password") is None
+
+
+class TestPasswordHashing:
+    def test_hashes_are_salted_and_verifiable(self):
+        from core.auth import hash_password, verify_password
+
+        first = hash_password("correct horse battery staple")
+        second = hash_password("correct horse battery staple")
+        assert first != second
+        assert verify_password("correct horse battery staple", first)
+        assert not verify_password("wrong password", first)
+        assert not verify_password("correct horse battery staple", "malformed")
