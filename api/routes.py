@@ -664,7 +664,7 @@ def review_payment(
     payment_id: int,
     payload: PaymentReviewRequest,
     db: Database = Depends(get_database),
-    user: dict = Depends(require_roles("ADMIN", "REVIEWER", "APPROVER", "AUDITOR")),
+    user: dict = Depends(require_roles("ADMIN", "REVIEWER", "APPROVER")),
 ):
     try:
         return db.review_payment_record(
