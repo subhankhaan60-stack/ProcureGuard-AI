@@ -512,7 +512,6 @@ class TestPaymentsAPI:
         }
         response = client.post("/api/payments/5/review", json={
             "decision": "CLEAR",
-            "reviewer_reference": "reviewer-01",
             "note": "Checked supporting documents.",
         })
         assert response.status_code == 200
@@ -520,7 +519,7 @@ class TestPaymentsAPI:
         mock_database.review_payment_record.assert_called_once_with(
             payment_id=5,
             decision="CLEAR",
-            reviewer_reference="reviewer-01",
+            reviewer_reference="admin@example.com",
             note="Checked supporting documents.",
         )
 
@@ -862,3 +861,42 @@ class TestResultsAPI:
         assert data["total_jobs"] == 10
         assert data["pass_rate"] == 0.8
         assert data["pass_count"] == 12
+
+
+class TestUserLoginAPI:
+    def test_login_returns_short_lived_bearer_token(self, client, mock_database, monkeypatch):
+        monkeypatch.setattr(settings, "user_session_secret", "test-session-secret-that-is-at-least-32-bytes")
+        monkeypatch.setattr(settings, "user_session_ttl_seconds", 1800)
+        mock_database.authenticate_user.return_value = {
+            "id": 3, "email": "reviewer@example.com", "full_name": "Reviewer",
+            "role": "REVIEWER", "is_active": True, "created_at": None,
+        }
+        response = client.post("/api/auth/login", json={
+            "email": "reviewer@example.com", "password": "correct-password"
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert data["token_type"] == "bearer"
+        assert data["expires_in"] == 1800
+        assert data["user"]["role"] == "REVIEWER"
+        assert "password" not in data["user"]
+        assert data["access_token"]
+
+    def test_login_rejects_invalid_credentials(self, client, mock_database, monkeypatch):
+        monkeypatch.setattr(settings, "user_session_secret", "test-session-secret-that-is-at-least-32-bytes")
+        mock_database.authenticate_user.return_value = None
+        response = client.post("/api/auth/login", json={
+            "email": "reviewer@example.com", "password": "wrong-password"
+        })
+        assert response.status_code == 401
+
+    def test_login_requires_session_secret(self, client, mock_database, monkeypatch):
+        monkeypatch.setattr(settings, "user_session_secret", None)
+        mock_database.authenticate_user.return_value = {
+            "id": 3, "email": "reviewer@example.com", "full_name": "Reviewer",
+            "role": "REVIEWER", "is_active": True,
+        }
+        response = client.post("/api/auth/login", json={
+            "email": "reviewer@example.com", "password": "correct-password"
+        })
+        assert response.status_code == 503
