@@ -65,6 +65,7 @@ from .schemas import (
     ParseInfo,
     POIngestResponse,
     LoginRequest,
+    UserCreateRequest,
     PaymentCreateRequest,
     PaymentReviewRequest,
     PaymentResponse,
@@ -602,6 +603,19 @@ def login_user(payload: LoginRequest, db: Database = Depends(get_database)):
         raise HTTPException(status_code=503, detail="User sessions are not configured. Set USER_SESSION_SECRET to a random secret of at least 32 characters.")
     token = create_access_token(user, settings.user_session_secret, settings.user_session_ttl_seconds)
     return {"access_token": token, "token_type": "bearer", "expires_in": settings.user_session_ttl_seconds, "user": user}
+
+
+@router.post("/auth/users", summary="Create a user account (administrator only)")
+def create_user_account(
+    payload: UserCreateRequest,
+    db: Database = Depends(get_database),
+    admin: dict = Depends(require_roles("ADMIN")),
+):
+    """Provision an account using an already authenticated administrator."""
+    try:
+        return db.create_user(**payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/auth/me", summary="Return the authenticated user profile")
