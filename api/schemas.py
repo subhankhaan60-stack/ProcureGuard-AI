@@ -131,6 +131,13 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=256)
 
 
+class UserCreateRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    full_name: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=12, max_length=256)
+    role: str = Field(pattern=r"^(?i:ADMIN|PREPARER|REVIEWER|APPROVER|AUDITOR)$")
+
+
 # ==================== PAYMENTS ====================
 
 
