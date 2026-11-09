@@ -521,7 +521,26 @@ class TestPaymentsAPI:
             decision="CLEAR",
             reviewer_reference="admin@example.com",
             note="Checked supporting documents.",
+            reviewer_user_id=1,
         )
+
+    def test_payment_creator_cannot_review_own_payment(self, client, mock_database):
+        mock_database.review_payment_record.side_effect = ValueError(
+            "Payment creator cannot review their own payment (segregation of duties)."
+        )
+        response = client.post("/api/payments/5/review", json={
+            "decision": "CLEAR",
+            "note": "Attempted self-review.",
+        })
+        assert response.status_code == 409
+        mock_database.review_payment_record.assert_called_once_with(
+            payment_id=5,
+            decision="CLEAR",
+            reviewer_reference="admin@example.com",
+            note="Attempted self-review.",
+            reviewer_user_id=1,
+        )
+
 
     def test_payment_duplicate_risk_endpoint_returns_review_indicators(self, client, mock_database):
         mock_database.find_duplicate_payment_candidates.return_value = [{
