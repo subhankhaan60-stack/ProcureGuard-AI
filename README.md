@@ -432,3 +432,21 @@ identity or enforce segregation of duties; `reviewer_reference` is caller-
 supplied metadata and must not be treated as verified identity. Production use
 requires individual authenticated accounts, role-based permissions, and
 independent approval controls.
+
+
+## Local User Identity Foundation (Not Yet API Authentication)
+
+The metadata database now includes a local `users` table with a unique normalized
+email, full name, role, active flag, creation timestamp, and a salted
+PBKDF2-HMAC-SHA256 password hash. Password hashing uses Python's standard
+library and a per-password random salt. Supported role labels are
+`ADMIN`, `PREPARER`, `REVIEWER`, `APPROVER`, and `AUDITOR`.
+
+The database layer provides user creation, credential verification, and
+non-secret user lookup primitives. Password hashes are never included in
+returned user dictionaries. User creation currently exists as an internal
+database operation only: there is no public registration endpoint, login
+endpoint, session/token issuance, role enforcement, MFA, account recovery,
+or verified reviewer identity in payment review routes yet. The existing
+shared `X-API-Key` remains the only API access gate. Do not treat this
+foundation as production-ready authentication or role-based access control.
