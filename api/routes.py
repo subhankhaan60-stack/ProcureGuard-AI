@@ -48,6 +48,8 @@ from .dependencies import (
     get_vector_store,
     get_po_store,
     require_api_key,
+    get_current_user,
+    require_roles,
 )
 from .schemas import (
     BatchErrorDetail,
@@ -62,6 +64,7 @@ from .schemas import (
     MatchDetailResponse,
     ParseInfo,
     POIngestResponse,
+    LoginRequest,
     PaymentCreateRequest,
     PaymentReviewRequest,
     PaymentResponse,
@@ -560,6 +563,7 @@ def get_results(
     job_id: int | None = Query(None, ge=1),
     limit: int = Query(50, ge=1, le=500),
     db: Database = Depends(get_database),
+    user: dict = Depends(get_current_user),
 ):
     results = db.get_results(
         vendor_name=vendor_name,
@@ -585,6 +589,27 @@ def get_results(
     ]
 
 
+
+# ==================== USER AUTHENTICATION ====================
+
+@router.post("/auth/login", summary="Exchange user credentials for a short-lived access token")
+def login_user(payload: LoginRequest, db: Database = Depends(get_database)):
+    """Authenticate an individual account; API key remains the outer deployment gate."""
+    from core.auth import create_access_token
+    user = db.authenticate_user(payload.email, payload.password)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    if not settings.user_session_secret or len(settings.user_session_secret) < 32:
+        raise HTTPException(status_code=503, detail="User sessions are not configured. Set USER_SESSION_SECRET to a random secret of at least 32 characters.")
+    token = create_access_token(user, settings.user_session_secret, settings.user_session_ttl_seconds)
+    return {"access_token": token, "token_type": "bearer", "expires_in": settings.user_session_ttl_seconds, "user": user}
+
+
+@router.get("/auth/me", summary="Return the authenticated user profile")
+def get_authenticated_profile(user: dict = Depends(get_current_user)):
+    return user
+
+
 # ==================== STATISTICS ====================
 
 
@@ -597,6 +622,7 @@ def get_results(
 def create_payment(
     payload: PaymentCreateRequest,
     db: Database = Depends(get_database),
+    user: dict = Depends(require_roles("ADMIN", "PREPARER")),
 ):
     try:
         return db.create_payment_record(**payload.model_dump())
@@ -638,12 +664,13 @@ def review_payment(
     payment_id: int,
     payload: PaymentReviewRequest,
     db: Database = Depends(get_database),
+    user: dict = Depends(require_roles("ADMIN", "REVIEWER", "APPROVER", "AUDITOR")),
 ):
     try:
         return db.review_payment_record(
             payment_id=payment_id,
             decision=payload.decision,
-            reviewer_reference=payload.reviewer_reference,
+            reviewer_reference=user["email"],
             note=payload.note,
         )
     except ValueError as exc:
@@ -659,6 +686,7 @@ def review_payment(
 def list_payment_reviews(
     payment_id: int,
     db: Database = Depends(get_database),
+    user: dict = Depends(get_current_user),
 ):
     try:
         return db.list_payment_review_events(payment_id)
@@ -679,6 +707,7 @@ def get_payment_review_queue(
     vendor_name: str | None = Query(None, min_length=1, max_length=255),
     limit: int = Query(100, ge=1, le=500),
     db: Database = Depends(get_database),
+    user: dict = Depends(require_roles("ADMIN", "REVIEWER", "APPROVER", "AUDITOR")),
 ):
     try:
         pending = db.list_payment_records(
