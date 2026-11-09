@@ -638,7 +638,10 @@ def create_payment(
     user: dict = Depends(require_roles("ADMIN", "PREPARER")),
 ):
     try:
-        return db.create_payment_record(**payload.model_dump())
+        return db.create_payment_record(
+            **payload.model_dump(),
+            created_by_user_id=user["id"],
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -686,10 +689,15 @@ def review_payment(
             decision=payload.decision,
             reviewer_reference=user["email"],
             note=payload.note,
+            reviewer_user_id=user["id"],
         )
     except ValueError as exc:
         message = str(exc)
-        status_code = 404 if "not found" in message.lower() else 409 if "Only PENDING_REVIEW" in message else 422
+        status_code = (
+            404 if "not found" in message.lower()
+            else 409 if "Only PENDING_REVIEW" in message or "cannot review their own payment" in message
+            else 422
+        )
         raise HTTPException(status_code=status_code, detail=message) from exc
 
 
