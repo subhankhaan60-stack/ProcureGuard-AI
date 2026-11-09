@@ -656,6 +656,51 @@ class TestPaymentRecords:
         assert len(history) == 1
         assert history[0]["reviewer_reference"] == "reviewer-01"
 
+    def test_creator_cannot_review_own_payment_but_another_user_can(self, db):
+        creator = db.create_user(
+            email="creator@example.com",
+            full_name="Payment Creator",
+            password="creator-password-123",
+            role="PREPARER",
+        )
+        reviewer = db.create_user(
+            email="reviewer@example.com",
+            full_name="Independent Reviewer",
+            password="reviewer-password-123",
+            role="REVIEWER",
+        )
+        payment = db.create_payment_record(
+            vendor_name="SoD Test Vendor",
+            amount="250.00",
+            currency="USD",
+            created_by_user_id=creator["id"],
+        )
+
+        with pytest.raises(ValueError, match="cannot review their own payment"):
+            db.review_payment_record(
+                payment_id=payment["id"],
+                decision="CLEAR",
+                reviewer_reference=creator["email"],
+                reviewer_user_id=creator["id"],
+                note="Attempted self-review.",
+            )
+
+        # A rejected self-review must leave the payment pending and create no review event.
+        assert db.list_payment_records(status="PENDING_REVIEW")[0]["id"] == payment["id"]
+        assert db.list_payment_review_events(payment["id"]) == []
+
+        result = db.review_payment_record(
+            payment_id=payment["id"],
+            decision="CLEAR",
+            reviewer_reference=reviewer["email"],
+            reviewer_user_id=reviewer["id"],
+            note="Independently reviewed supporting evidence.",
+        )
+        assert result["payment"]["status"] == "REVIEWED_CLEAR"
+        assert result["payment"]["created_by_user_id"] == creator["id"]
+        assert result["review"]["reviewer_reference"] == reviewer["email"]
+
+
     def test_rejects_second_review_decision_and_invalid_review_data(self, db):
         payment = db.create_payment_record(
             vendor_name="Acme Corp", amount="125.00", currency="USD"
