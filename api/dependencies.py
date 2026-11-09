@@ -8,7 +8,9 @@ Uses functools.lru_cache for singleton behavior.
 from functools import lru_cache
 import hmac
 
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, status, Depends
+
+from core.auth import decode_access_token
 
 from config import settings
 from core.database import Database
@@ -103,3 +105,41 @@ def get_batch_service() -> BatchService:
         match_service=get_match_service(),
         database=get_database(),
     )
+
+
+
+def get_current_user(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    db: Database = Depends(get_database),
+) -> dict:
+    """Resolve an individual user from a signed, short-lived bearer token."""
+    if not settings.user_session_secret or len(settings.user_session_secret) < 32:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="User sessions are not configured. Set USER_SESSION_SECRET to a random secret of at least 32 characters.",
+        )
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="A valid bearer access token is required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    claims = decode_access_token(authorization[7:].strip(), settings.user_session_secret)
+    if claims is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired access token.")
+    user = db.get_user(int(claims["sub"]))
+    if not user or not user["is_active"] or user["email"] != claims["email"] or user["role"] != claims["role"]:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User account is unavailable or its permissions have changed.")
+    return user
+
+
+def require_roles(*allowed_roles: str):
+    """Build a dependency that restricts an endpoint to named user roles."""
+    allowed = {role.upper() for role in allowed_roles}
+
+    def check_role(user: dict = Depends(get_current_user)) -> dict:
+        if user["role"].upper() not in allowed:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Your account role is not permitted to perform this action.")
+        return user
+
+    return check_role
