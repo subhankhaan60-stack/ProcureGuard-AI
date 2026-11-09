@@ -35,6 +35,7 @@ from typing import Optional
 from sqlalchemy import (
     Column,
     DateTime,
+    Boolean,
     Float,
     ForeignKey,
     Integer,
@@ -119,6 +120,20 @@ class Result(Base):
 
     def __repr__(self):
         return f"<Result(id={self.id}, invoice={self.invoice_number}, status={self.status})>"
+
+
+class User(Base):
+    """Local application identity; passwords are stored only as salted PBKDF2 hashes."""
+
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    email = Column(String(320), nullable=False, unique=True, index=True)
+    full_name = Column(String(255), nullable=False)
+    password_hash = Column(String(256), nullable=False)
+    role = Column(String(30), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
 class VendorBankProfile(Base):
@@ -692,6 +707,82 @@ class Database:
                 "previous": previous if changed else None,
                 "current": {"bank_name": bank, "account_last4": last4},
             }
+
+    # ==================== USER IDENTITY FOUNDATION ====================
+
+    def create_user(
+        self,
+        email: str,
+        full_name: str,
+        password: str,
+        role: str = "REVIEWER",
+    ) -> dict:
+        """Create a local user account. Provisioning authorization is not yet exposed by the API."""
+        from core.auth import hash_password
+
+        email_value = (email or "").strip().casefold()
+        name_value = (full_name or "").strip()
+        role_value = (role or "").strip().upper()
+        if not email_value or len(email_value) > 320 or "@" not in email_value:
+            raise ValueError("A valid email address is required.")
+        if not name_value or len(name_value) > 255:
+            raise ValueError("Full name is required and must be 255 characters or fewer.")
+        if role_value not in ("ADMIN", "PREPARER", "REVIEWER", "APPROVER", "AUDITOR"):
+            raise ValueError("Unsupported user role.")
+        if not isinstance(password, str) or len(password) < 12 or len(password) > 256:
+            raise ValueError("Password must be between 12 and 256 characters.")
+
+        with self.session() as session:
+            if session.query(User).filter(User.email == email_value).first():
+                raise ValueError("A user with this email already exists.")
+            user = User(
+                email=email_value,
+                full_name=name_value,
+                password_hash=hash_password(password),
+                role=role_value,
+                is_active=True,
+            )
+            session.add(user)
+            session.flush()
+            self._audit(session, "user_created", "user", str(user.id), {
+                "email": email_value, "role": role_value,
+            })
+            session.commit()
+            session.refresh(user)
+            return self._user_dict(user)
+
+    @staticmethod
+    def _user_dict(user: User) -> dict:
+        return {
+            "id": user.id,
+            "email": user.email,
+            "full_name": user.full_name,
+            "role": user.role,
+            "is_active": user.is_active,
+            "created_at": user.created_at.isoformat() if user.created_at else None,
+        }
+
+    def authenticate_user(self, email: str, password: str) -> Optional[dict]:
+        """Verify local credentials and return non-secret identity data."""
+        from core.auth import verify_password
+
+        email_value = (email or "").strip().casefold()
+        if not email_value or not isinstance(password, str):
+            return None
+        with self.session() as session:
+            user = session.query(User).filter(User.email == email_value).first()
+            if user is None or not user.is_active:
+                return None
+            if not verify_password(password, user.password_hash):
+                return None
+            return self._user_dict(user)
+
+    def get_user(self, user_id: int) -> Optional[dict]:
+        if user_id <= 0:
+            return None
+        with self.session() as session:
+            user = session.get(User, user_id)
+            return self._user_dict(user) if user else None
 
     # ==================== PAYMENT RECORDS ====================
 
