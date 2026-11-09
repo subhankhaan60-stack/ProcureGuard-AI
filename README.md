@@ -450,3 +450,34 @@ endpoint, session/token issuance, role enforcement, MFA, account recovery,
 or verified reviewer identity in payment review routes yet. The existing
 shared `X-API-Key` remains the only API access gate. Do not treat this
 foundation as production-ready authentication or role-based access control.
+
+
+## Individual Login and Payment Role Controls
+
+The API now supports individual account login through `POST /api/auth/login`
+and profile lookup through `GET /api/auth/me`. Login returns a short-lived
+HMAC-SHA256 signed bearer token. Configure `USER_SESSION_SECRET` as a
+cryptographically random secret of at least 32 characters; the default token
+lifetime is 1,800 seconds (30 minutes), configurable with
+`USER_SESSION_TTL_SECONDS` from 60 to 86,400 seconds. Keep this secret outside
+source control and rotate it deliberately (rotation invalidates existing tokens).
+
+The existing `X-API-Key` remains required for all API routes, including login.
+Payment endpoints additionally require a valid individual bearer token:
+- Create payment: `ADMIN` or `PREPARER`
+- Review payment: `ADMIN`, `REVIEWER`, or `APPROVER`
+- Read payments/review history: any active authenticated user
+- Payment review queue: `ADMIN`, `REVIEWER`, `APPROVER`, or `AUDITOR`
+
+Reviewer identity is now taken from the authenticated account email; the caller
+cannot supply a different reviewer reference in the review request. User
+deactivation or role changes are checked against the database on each request,
+so a token does not preserve stale role permissions.
+
+**Current limitations:** user provisioning is still an internal database
+operation, not a public admin endpoint. There is no MFA, password reset,
+refresh-token flow, login rate limiting/lockout, per-company tenant isolation,
+or verified email process. Payment creator identity is not yet persisted, so
+segregation-of-duties (preventing a preparer from reviewing their own payment)
+is not yet enforced. The API key is still required alongside bearer tokens.
+This is a development security foundation, not a production security certification.
