@@ -911,3 +911,27 @@ class TestPasswordHashing:
         assert verify_password("correct horse battery staple", first)
         assert not verify_password("wrong password", first)
         assert not verify_password("correct horse battery staple", "malformed")
+
+
+class TestSignedAccessTokens:
+    def test_token_round_trip_and_tamper_rejection(self):
+        from core.auth import create_access_token, decode_access_token
+
+        user = {"id": 42, "email": "reviewer@example.com", "role": "REVIEWER"}
+        secret = "test-session-secret-that-is-at-least-32-bytes"
+        token = create_access_token(user, secret, 300)
+        claims = decode_access_token(token, secret)
+        assert claims["sub"] == "42"
+        assert claims["email"] == user["email"]
+        assert claims["role"] == user["role"]
+        assert decode_access_token(token + "x", secret) is None
+        assert decode_access_token(token, "different-secret-that-is-also-32-bytes") is None
+
+    def test_token_requires_strong_secret_and_valid_lifetime(self):
+        from core.auth import create_access_token
+
+        user = {"id": 1, "email": "admin@example.com", "role": "ADMIN"}
+        with pytest.raises(ValueError, match="32 characters"):
+            create_access_token(user, "weak")
+        with pytest.raises(ValueError, match="lifetime"):
+            create_access_token(user, "strong-session-secret-at-least-32-chars", 10)
