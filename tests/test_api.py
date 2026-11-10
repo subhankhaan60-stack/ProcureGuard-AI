@@ -437,6 +437,7 @@ class TestPaymentsAPI:
             "payment_date": "2026-11-08",
             "source": "MANUAL",
             "status": "PENDING_REVIEW",
+            "created_by_user_id": 1,
             "created_at": "2026-11-08T12:00:00+00:00",
         }
 
@@ -449,6 +450,8 @@ class TestPaymentsAPI:
                 "amount": "1250.50",
                 "currency": "usd",
                 "payment_date": "2026-11-08",
+                # A client-supplied creator ID must never override authenticated identity.
+                "created_by_user_id": 999,
             },
         )
 
@@ -457,8 +460,10 @@ class TestPaymentsAPI:
         assert data["status"] == "PENDING_REVIEW"
         assert data["amount"] == "1250.50"
         assert data["currency"] == "USD"
+        assert data["created_by_user_id"] == 1
         assert "bank_account_fingerprint" not in data
         mock_database.create_payment_record.assert_called_once()
+        assert mock_database.create_payment_record.call_args.kwargs["created_by_user_id"] == 1
 
     def test_create_payment_rejects_invalid_amount(self, client):
         response = client.post(
