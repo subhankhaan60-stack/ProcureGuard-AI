@@ -28,7 +28,7 @@ Job State Machine:
 import json
 import logging
 import hashlib
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timezone, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Optional
@@ -857,7 +857,7 @@ class Database:
                 attempts += 1
                 window_started = current_naive if reset_window else datetime.fromisoformat(row[1])
                 locked_until_value = (
-                    (current + __import__("datetime").timedelta(seconds=lockout_seconds))
+                    (current + timedelta(seconds=lockout_seconds))
                     .astimezone(timezone.utc).replace(tzinfo=None).isoformat()
                     if attempts >= threshold else None
                 )
