@@ -1013,6 +1013,29 @@ class TestLoginThrottling:
         db.clear_login_attempts("user@example.com", "203.0.113.10")
         assert db.login_rate_limit_remaining("user@example.com", "203.0.113.10", now) == 0
 
+    def test_concurrent_failures_cannot_bypass_lockout_threshold(self, db):
+        from datetime import datetime, timezone
+
+        now = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
+        barrier = Barrier(8)
+
+        def record_failure(_):
+            barrier.wait(timeout=5)
+            return db.record_failed_login(
+                "race@example.com", "203.0.113.20", now
+            )
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(record_failure, range(8)))
+
+        # Four attempts are accepted; the fifth atomically starts lockout.
+        # Remaining concurrent requests observe the lockout and cannot add attempts.
+        assert results.count(0) == 4
+        assert results.count(900) == 4
+        assert db.login_rate_limit_remaining(
+            "race@example.com", "203.0.113.20", now
+        ) == 900
+
     def test_expired_lockout_allows_new_attempts(self, db):
         from datetime import datetime, timedelta, timezone
 
