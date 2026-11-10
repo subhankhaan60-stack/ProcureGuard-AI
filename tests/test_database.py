@@ -11,7 +11,7 @@ from threading import Barrier
 import pytest
 from pathlib import Path
 
-from core.database import AuditLog, Base, Database, Job, Result
+from core.database import AuditLog, Base, Database, Job, LoginAttempt, Result
 
 
 # ==================== FIXTURES ====================
@@ -980,3 +980,45 @@ class TestSignedAccessTokens:
             create_access_token(user, "weak")
         with pytest.raises(ValueError, match="lifetime"):
             create_access_token(user, "strong-session-secret-at-least-32-chars", 10)
+
+
+
+# ==================== LOGIN THROTTLING ====================
+
+
+class TestLoginThrottling:
+    def test_locks_after_five_failures_for_same_email_and_ip(self, db):
+        from datetime import datetime, timezone
+
+        now = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
+        for _ in range(4):
+            assert db.record_failed_login("User@example.com", "203.0.113.10", now) == 0
+        assert db.record_failed_login("user@example.com", "203.0.113.10", now) == 900
+        assert db.login_rate_limit_remaining("USER@example.com", "203.0.113.10", now) == 900
+
+    def test_different_ip_has_separate_throttle_key(self, db):
+        from datetime import datetime, timezone
+
+        now = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
+        for _ in range(5):
+            db.record_failed_login("user@example.com", "203.0.113.10", now)
+        assert db.login_rate_limit_remaining("user@example.com", "203.0.113.11", now) == 0
+
+    def test_successful_login_clears_attempts(self, db):
+        from datetime import datetime, timezone
+
+        now = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
+        for _ in range(5):
+            db.record_failed_login("user@example.com", "203.0.113.10", now)
+        db.clear_login_attempts("user@example.com", "203.0.113.10")
+        assert db.login_rate_limit_remaining("user@example.com", "203.0.113.10", now) == 0
+
+    def test_expired_lockout_allows_new_attempts(self, db):
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
+        for _ in range(5):
+            db.record_failed_login("user@example.com", "203.0.113.10", now)
+        later = now + timedelta(minutes=16)
+        assert db.login_rate_limit_remaining("user@example.com", "203.0.113.10", later) == 0
+        assert db.record_failed_login("user@example.com", "203.0.113.10", later) == 0
