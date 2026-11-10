@@ -906,6 +906,26 @@ class TestUserLoginAPI:
         assert "password" not in data["user"]
         assert data["access_token"]
 
+    def test_login_throttles_after_five_failures(self, client, mock_database):
+        mock_database.login_rate_limit_remaining.return_value = 900
+        response = client.post("/api/auth/login", json={
+            "email": "reviewer@example.com", "password": "wrong-password"
+        })
+        assert response.status_code == 429
+        assert response.headers["Retry-After"] == "900"
+        mock_database.authenticate_user.assert_not_called()
+
+    def test_invalid_login_records_failure(self, client, mock_database):
+        mock_database.login_rate_limit_remaining.return_value = 0
+        mock_database.authenticate_user.return_value = None
+        response = client.post("/api/auth/login", json={
+            "email": "reviewer@example.com", "password": "wrong-password"
+        })
+        assert response.status_code == 401
+        mock_database.record_failed_login.assert_called_once_with(
+            "reviewer@example.com", "testclient"
+        )
+
     def test_login_rejects_invalid_credentials(self, client, mock_database, monkeypatch):
         monkeypatch.setattr(settings, "user_session_secret", "test-session-secret-that-is-at-least-32-bytes")
         mock_database.authenticate_user.return_value = None
