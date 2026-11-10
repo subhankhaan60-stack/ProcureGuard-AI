@@ -27,6 +27,7 @@ Job State Machine:
 
 import json
 import logging
+import hashlib
 from datetime import date, datetime, time, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -134,6 +135,17 @@ class User(Base):
     role = Column(String(30), nullable=False)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class LoginAttempt(Base):
+    """Persistent throttling state keyed by a one-way email/IP digest."""
+
+    __tablename__ = "login_attempts"
+
+    key = Column(String(64), primary_key=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    window_started_at = Column(DateTime, nullable=False)
+    locked_until = Column(DateTime, nullable=True)
 
 
 class VendorBankProfile(Base):
@@ -774,6 +786,101 @@ class Database:
             "is_active": user.is_active,
             "created_at": user.created_at.isoformat() if user.created_at else None,
         }
+
+    @staticmethod
+    def _login_attempt_key(email: str, client_ip: str) -> str:
+        """Hash normalized identifiers; never persist raw email addresses or IPs."""
+        normalized_email = (email or "").strip().casefold()
+        normalized_ip = (client_ip or "unknown").strip()
+        return hashlib.sha256(
+            f"{normalized_email}\\0{normalized_ip}".encode("utf-8")
+        ).hexdigest()
+
+    def login_rate_limit_remaining(
+        self,
+        email: str,
+        client_ip: str,
+        now: Optional[datetime] = None,
+    ) -> int:
+        """Return remaining lockout seconds; defaults to 5 failures / 15 minutes."""
+        current = now or datetime.now(timezone.utc)
+        key = self._login_attempt_key(email, client_ip)
+        with self.session() as session:
+            state = session.get(LoginAttempt, key)
+            if not state or not state.locked_until:
+                return 0
+            locked_until = state.locked_until
+            if locked_until.tzinfo is None:
+                locked_until = locked_until.replace(tzinfo=timezone.utc)
+            return max(0, int((locked_until - current).total_seconds()))
+
+    def record_failed_login(
+        self,
+        email: str,
+        client_ip: str,
+        now: Optional[datetime] = None,
+    ) -> int:
+        """Atomically record a failure and return active lockout seconds."""
+        current = now or datetime.now(timezone.utc)
+        key = self._login_attempt_key(email, client_ip)
+        window_seconds = 15 * 60
+        threshold = 5
+        lockout_seconds = 15 * 60
+        current_naive = current.astimezone(timezone.utc).replace(tzinfo=None)
+
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                row = connection.exec_driver_sql(
+                    "SELECT attempts, window_started_at, locked_until "
+                    "FROM login_attempts WHERE key = ?", (key,)
+                ).fetchone()
+                if row and row[2]:
+                    locked_until = datetime.fromisoformat(row[2])
+                    if locked_until.tzinfo is None:
+                        locked_until = locked_until.replace(tzinfo=timezone.utc)
+                    remaining = int((locked_until - current).total_seconds())
+                    if remaining > 0:
+                        connection.commit()
+                        return remaining
+
+                attempts = 0
+                reset_window = True
+                if row:
+                    started = datetime.fromisoformat(row[1])
+                    if started.tzinfo is None:
+                        started = started.replace(tzinfo=timezone.utc)
+                    if (current - started).total_seconds() < window_seconds:
+                        attempts = int(row[0])
+                        reset_window = False
+
+                attempts += 1
+                window_started = current_naive if reset_window else datetime.fromisoformat(row[1])
+                locked_until_value = (
+                    (current + __import__("datetime").timedelta(seconds=lockout_seconds))
+                    .astimezone(timezone.utc).replace(tzinfo=None).isoformat()
+                    if attempts >= threshold else None
+                )
+                connection.exec_driver_sql(
+                    "INSERT INTO login_attempts "
+                    "(key, attempts, window_started_at, locked_until) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET attempts=excluded.attempts, "
+                    "window_started_at=excluded.window_started_at, locked_until=excluded.locked_until",
+                    (key, attempts, window_started.isoformat(), locked_until_value),
+                )
+                connection.commit()
+                return lockout_seconds if locked_until_value else 0
+            except Exception:
+                connection.rollback()
+                raise
+
+    def clear_login_attempts(self, email: str, client_ip: str) -> None:
+        """Clear the matching throttling record after successful authentication."""
+        key = self._login_attempt_key(email, client_ip)
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql(
+                "DELETE FROM login_attempts WHERE key = ?", (key,)
+            )
 
     def authenticate_user(self, email: str, password: str) -> Optional[dict]:
         """Verify local credentials and return non-secret identity data."""
