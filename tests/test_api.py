@@ -889,6 +889,7 @@ class TestResultsAPI:
 
 class TestUserLoginAPI:
     def test_login_returns_short_lived_bearer_token(self, client, mock_database, monkeypatch):
+        mock_database.login_rate_limit_remaining.return_value = 0
         monkeypatch.setattr(settings, "user_session_secret", "test-session-secret-that-is-at-least-32-bytes")
         monkeypatch.setattr(settings, "user_session_ttl_seconds", 1800)
         mock_database.authenticate_user.return_value = {
@@ -927,6 +928,7 @@ class TestUserLoginAPI:
         )
 
     def test_login_rejects_invalid_credentials(self, client, mock_database, monkeypatch):
+        mock_database.login_rate_limit_remaining.return_value = 0
         monkeypatch.setattr(settings, "user_session_secret", "test-session-secret-that-is-at-least-32-bytes")
         mock_database.authenticate_user.return_value = None
         response = client.post("/api/auth/login", json={
@@ -935,6 +937,7 @@ class TestUserLoginAPI:
         assert response.status_code == 401
 
     def test_login_requires_session_secret(self, client, mock_database, monkeypatch):
+        mock_database.login_rate_limit_remaining.return_value = 0
         monkeypatch.setattr(settings, "user_session_secret", None)
         mock_database.authenticate_user.return_value = {
             "id": 3, "email": "reviewer@example.com", "full_name": "Reviewer",
