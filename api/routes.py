@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 
 from config import settings
@@ -593,12 +593,29 @@ def get_results(
 # ==================== USER AUTHENTICATION ====================
 
 @router.post("/auth/login", summary="Exchange user credentials for a short-lived access token")
-def login_user(payload: LoginRequest, db: Database = Depends(get_database)):
-    """Authenticate an individual account; API key remains the outer deployment gate."""
+def login_user(
+    payload: LoginRequest,
+    request: Request,
+    db: Database = Depends(get_database),
+):
+    """Authenticate with persistent, per-email-and-client-IP throttling."""
     from core.auth import create_access_token
+
+    client_ip = request.client.host if request.client else "unknown"
+    retry_after = db.login_rate_limit_remaining(payload.email, client_ip)
+    if retry_after > 0:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts. Please try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     user = db.authenticate_user(payload.email, payload.password)
     if user is None:
+        db.record_failed_login(payload.email, client_ip)
         raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    db.clear_login_attempts(payload.email, client_ip)
     if not settings.user_session_secret or len(settings.user_session_secret) < 32:
         raise HTTPException(status_code=503, detail="User sessions are not configured. Set USER_SESSION_SECRET to a random secret of at least 32 characters.")
     token = create_access_token(user, settings.user_session_secret, settings.user_session_ttl_seconds)
