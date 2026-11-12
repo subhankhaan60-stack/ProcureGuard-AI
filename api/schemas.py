@@ -131,11 +131,17 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=256)
 
 
+class CompanyCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    slug: str = Field(min_length=1, max_length=80, pattern=r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
+
+
 class UserCreateRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     full_name: str = Field(min_length=1, max_length=255)
     password: str = Field(min_length=12, max_length=256)
     role: str = Field(pattern=r"^(?i:ADMIN|PREPARER|REVIEWER|APPROVER|AUDITOR)$")
+    company_id: Optional[int] = Field(None, ge=1)
 
 
 # ==================== PAYMENTS ====================
