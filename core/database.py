@@ -123,12 +123,25 @@ class Result(Base):
         return f"<Result(id={self.id}, invoice={self.invoice_number}, status={self.status})>"
 
 
+class Company(Base):
+    """Tenant account that owns application users and business records."""
+
+    __tablename__ = "companies"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), nullable=False)
+    slug = Column(String(80), nullable=False, unique=True, index=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
 class User(Base):
     """Local application identity; passwords are stored only as salted PBKDF2 hashes."""
 
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=True, index=True)
     email = Column(String(320), nullable=False, unique=True, index=True)
     full_name = Column(String(255), nullable=False)
     password_hash = Column(String(256), nullable=False)
@@ -270,6 +283,18 @@ class Database:
             if "parent_job_id" not in columns:
                 connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN parent_job_id INTEGER REFERENCES jobs(id)")
                 connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_jobs_parent_job_id ON jobs(parent_job_id)")
+
+            # Backward-compatible tenant ownership for user identities.
+            user_columns = {
+                row[1] for row in connection.exec_driver_sql("PRAGMA table_info(users)").fetchall()
+            }
+            if "company_id" not in user_columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE users ADD COLUMN company_id INTEGER REFERENCES companies(id)"
+                )
+                connection.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS ix_users_company_id ON users(company_id)"
+                )
 
             # Backward-compatible migration for payment creator attribution.
             payment_columns = {
@@ -735,12 +760,54 @@ class Database:
 
     # ==================== USER IDENTITY FOUNDATION ====================
 
+    def create_company(self, name: str, slug: str) -> dict:
+        """Create a tenant company with a stable, unique URL-safe slug."""
+        import re
+
+        name_value = (name or "").strip()
+        slug_value = (slug or "").strip().lower()
+        if not name_value or len(name_value) > 255:
+            raise ValueError("Company name is required and must be 255 characters or fewer.")
+        if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?", slug_value):
+            raise ValueError("Company slug must contain 1-80 lowercase letters, numbers, or internal hyphens.")
+
+        with self.session() as session:
+            if session.query(Company).filter(Company.slug == slug_value).first():
+                raise ValueError("A company with this slug already exists.")
+            company = Company(name=name_value, slug=slug_value, is_active=True)
+            session.add(company)
+            session.flush()
+            self._audit(session, "company_created", "company", str(company.id), {
+                "name": name_value, "slug": slug_value,
+            })
+            session.commit()
+            session.refresh(company)
+            return self._company_dict(company)
+
+    @staticmethod
+    def _company_dict(company: Company) -> dict:
+        return {
+            "id": company.id,
+            "name": company.name,
+            "slug": company.slug,
+            "is_active": company.is_active,
+            "created_at": company.created_at.isoformat() if company.created_at else None,
+        }
+
+    def get_company(self, company_id: int) -> Optional[dict]:
+        if company_id <= 0:
+            return None
+        with self.session() as session:
+            company = session.get(Company, company_id)
+            return self._company_dict(company) if company else None
+
     def create_user(
         self,
         email: str,
         full_name: str,
         password: str,
         role: str = "REVIEWER",
+        company_id: Optional[int] = None,
     ) -> dict:
         """Create a local user account. Provisioning authorization is not yet exposed by the API."""
         from core.auth import hash_password
@@ -758,9 +825,14 @@ class Database:
             raise ValueError("Password must be between 12 and 256 characters.")
 
         with self.session() as session:
+            if company_id is not None:
+                company = session.get(Company, company_id)
+                if company is None or not company.is_active:
+                    raise ValueError("A valid active company is required.")
             if session.query(User).filter(User.email == email_value).first():
                 raise ValueError("A user with this email already exists.")
             user = User(
+                company_id=company_id,
                 email=email_value,
                 full_name=name_value,
                 password_hash=hash_password(password),
@@ -771,6 +843,7 @@ class Database:
             session.flush()
             self._audit(session, "user_created", "user", str(user.id), {
                 "email": email_value, "role": role_value,
+                "company_id": company_id,
             })
             session.commit()
             session.refresh(user)
@@ -780,6 +853,7 @@ class Database:
     def _user_dict(user: User) -> dict:
         return {
             "id": user.id,
+            "company_id": user.company_id,
             "email": user.email,
             "full_name": user.full_name,
             "role": user.role,
