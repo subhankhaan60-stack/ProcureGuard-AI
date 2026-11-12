@@ -887,6 +887,45 @@ class TestResultsAPI:
         assert data["pass_count"] == 12
 
 
+class TestCompanyProvisioningAPI:
+    def test_admin_can_create_company(self, client, mock_database):
+        mock_database.create_company.return_value = {
+            "id": 12, "name": "Apex Global", "slug": "apex-global",
+            "is_active": True, "created_at": None,
+        }
+        response = client.post("/api/companies", json={
+            "name": "Apex Global", "slug": "apex-global",
+        })
+        assert response.status_code == 200
+        assert response.json()["id"] == 12
+        mock_database.create_company.assert_called_once_with(
+            name="Apex Global", slug="apex-global"
+        )
+
+    def test_company_creation_maps_validation_errors(self, client, mock_database):
+        mock_database.create_company.side_effect = ValueError("Company slug is invalid.")
+        response = client.post("/api/companies", json={
+            "name": "Apex Global", "slug": "apex-global",
+        })
+        assert response.status_code == 422
+
+    def test_user_provisioning_accepts_company_assignment(self, client, mock_database):
+        mock_database.create_user.return_value = {
+            "id": 13, "company_id": 12, "email": "member@example.com",
+            "full_name": "Company Member", "role": "REVIEWER",
+            "is_active": True, "created_at": None,
+        }
+        response = client.post("/api/auth/users", json={
+            "email": "member@example.com", "full_name": "Company Member",
+            "password": "a-strong-password-123", "role": "REVIEWER",
+            "company_id": 12,
+        })
+        assert response.status_code == 200
+        assert response.json()["company_id"] == 12
+        mock_database.create_user.assert_called_once()
+        assert mock_database.create_user.call_args.kwargs["company_id"] == 12
+
+
 class TestUserLoginAPI:
     def test_login_returns_short_lived_bearer_token(self, client, mock_database, monkeypatch):
         mock_database.login_rate_limit_remaining.return_value = 0
