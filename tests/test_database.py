@@ -893,6 +893,50 @@ class TestPaymentBankProfileMismatch:
             db.find_payment_bank_profile_mismatches(limit=0)
 
 
+class TestCompanyTenantFoundation:
+    def test_creates_company_and_audits_creation(self, db):
+        company = db.create_company("Apex Global", "apex-global")
+        assert company["name"] == "Apex Global"
+        assert company["slug"] == "apex-global"
+        assert company["is_active"] is True
+        assert db.get_company(company["id"])["slug"] == "apex-global"
+        audit = db.get_audit_log(entity_type="company", limit=5)
+        assert any(
+            row.action == "company_created"
+            and row.audit_metadata["slug"] == "apex-global"
+            for row in audit
+        )
+
+    def test_rejects_duplicate_or_invalid_company_slug(self, db):
+        db.create_company("Apex Global", "apex-global")
+        with pytest.raises(ValueError, match="already exists"):
+            db.create_company("Another Name", "apex-global")
+        with pytest.raises(ValueError, match="slug"):
+            db.create_company("Invalid", "Not A Slug")
+
+    def test_links_user_to_active_company(self, db):
+        company = db.create_company("Apex Global", "apex-global")
+        user = db.create_user(
+            email="tenant-user@example.com",
+            full_name="Tenant User",
+            password="a-long-test-password",
+            role="REVIEWER",
+            company_id=company["id"],
+        )
+        assert user["company_id"] == company["id"]
+        assert db.get_user(user["id"])["company_id"] == company["id"]
+
+    def test_rejects_unknown_company_for_user(self, db):
+        with pytest.raises(ValueError, match="active company"):
+            db.create_user(
+                email="orphan@example.com",
+                full_name="Orphan User",
+                password="a-long-test-password",
+                role="REVIEWER",
+                company_id=999999,
+            )
+
+
 class TestLocalUserIdentityFoundation:
     def test_creates_user_with_hashed_password_and_audit_event(self, db):
         user = db.create_user(
