@@ -65,6 +65,7 @@ from .schemas import (
     ParseInfo,
     POIngestResponse,
     LoginRequest,
+    CompanyCreateRequest,
     UserCreateRequest,
     PaymentCreateRequest,
     PaymentReviewRequest,
@@ -620,6 +621,19 @@ def login_user(
         raise HTTPException(status_code=503, detail="User sessions are not configured. Set USER_SESSION_SECRET to a random secret of at least 32 characters.")
     token = create_access_token(user, settings.user_session_secret, settings.user_session_ttl_seconds)
     return {"access_token": token, "token_type": "bearer", "expires_in": settings.user_session_ttl_seconds, "user": user}
+
+
+@router.post("/companies", summary="Create a company tenant (administrator only)")
+def create_company_account(
+    payload: CompanyCreateRequest,
+    db: Database = Depends(get_database),
+    admin: dict = Depends(require_roles("ADMIN")),
+):
+    """Create a tenant container; existing unassigned records are not migrated automatically."""
+    try:
+        return db.create_company(**payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/auth/users", summary="Create a user account (administrator only)")
