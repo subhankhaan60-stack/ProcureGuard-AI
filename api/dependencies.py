@@ -154,3 +154,18 @@ def require_company_user(user: dict = Depends(get_current_user)) -> dict:
             detail="Your user account is not assigned to an active company tenant.",
         )
     return user
+
+
+def require_company_roles(*allowed_roles: str):
+    """Require both a tenant assignment and one of the named roles."""
+    allowed = {role.upper() for role in allowed_roles}
+
+    def check_role(user: dict = Depends(require_company_user)) -> dict:
+        if user["role"].upper() not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Your account role is not permitted to perform this action.",
+            )
+        return user
+
+    return check_role
