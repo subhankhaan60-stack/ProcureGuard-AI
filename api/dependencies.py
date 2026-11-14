@@ -153,6 +153,12 @@ def require_company_user(user: dict = Depends(get_current_user)) -> dict:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Your user account is not assigned to an active company tenant.",
         )
+    company = get_database().get_company(company_id)
+    if not company or not company.get("is_active", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your company tenant is unavailable or inactive.",
+        )
     return user
 
 
