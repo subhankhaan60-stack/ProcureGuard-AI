@@ -484,3 +484,76 @@ class TestPONotFoundScenario:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+class TestQuantityAndPriceDiscrepancyRules:
+    """Rule-level tests for invoice-versus-PO line variances."""
+
+    @pytest.fixture
+    def matcher(self, tmp_path):
+        store = VectorStore(persist_directory=str(tmp_path / "vectors"))
+        return Matcher(store, match_tolerance=0.01)
+
+    def _compare(self, matcher, invoice_item, po_item):
+        return matcher._compare_line_items(
+            [invoice_item], [po_item], "invoice_po"
+        )
+
+    def test_invoice_quantity_above_po_is_error(self, matcher):
+        invoice = LineItem(description="Consulting", quantity=12, unit_price=100, total=1200)
+        po = LineItem(description="Consulting", quantity=10, unit_price=100, total=1000)
+
+        issues = self._compare(matcher, invoice, po)
+
+        issue = next(i for i in issues if i.rule == "line_qty_match")
+        assert issue.severity == "error"
+        assert issue.invoice_value == 12
+        assert issue.contract_value == 10
+        assert "exceeds" in issue.message
+
+    def test_invoice_quantity_below_po_is_review_warning(self, matcher):
+        invoice = LineItem(description="Consulting", quantity=8, unit_price=100, total=800)
+        po = LineItem(description="Consulting", quantity=10, unit_price=100, total=1000)
+
+        issues = self._compare(matcher, invoice, po)
+
+        issue = next(i for i in issues if i.rule == "line_qty_match")
+        assert issue.severity == "warning"
+        assert "below" in issue.message
+
+    def test_invoice_unit_price_above_po_beyond_tolerance_is_error(self, matcher):
+        invoice = LineItem(description="Consulting", quantity=10, unit_price=105, total=1050)
+        po = LineItem(description="Consulting", quantity=10, unit_price=100, total=1000)
+
+        issues = self._compare(matcher, invoice, po)
+
+        issue = next(i for i in issues if i.rule == "line_price_match")
+        assert issue.severity == "error"
+        assert "5.00% variance" in issue.message
+
+    def test_invoice_unit_price_below_po_is_warning(self, matcher):
+        invoice = LineItem(description="Consulting", quantity=10, unit_price=95, total=950)
+        po = LineItem(description="Consulting", quantity=10, unit_price=100, total=1000)
+
+        issues = self._compare(matcher, invoice, po)
+
+        issue = next(i for i in issues if i.rule == "line_price_match")
+        assert issue.severity == "warning"
+        assert "below" in issue.message
+
+    def test_invoice_lines_without_po_line_detail_require_review(self, matcher):
+        invoice = LineItem(description="Consulting", quantity=1, unit_price=100, total=100)
+
+        issues = matcher._compare_line_items([invoice], [], "invoice_po")
+
+        assert len(issues) == 1
+        assert issues[0].rule == "po_line_items_missing"
+        assert issues[0].severity == "warning"
+
+    def test_unmatched_invoice_line_requires_review(self, matcher):
+        invoice = LineItem(description="Cloud hosting", quantity=1, unit_price=100, total=100)
+        po = LineItem(description="Consulting", quantity=1, unit_price=100, total=100)
+
+        issues = self._compare(matcher, invoice, po)
+
+        assert any(i.rule == "line_item_not_found" and i.severity == "warning" for i in issues)
+

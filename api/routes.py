@@ -22,14 +22,21 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 
 from config import settings
 from core.database import Database
+from core.exceptions import StoreError
+from core.extraction import ExtractionError
 from core.demo import load_demo_data
 from core.export import export_results_excel
-from core.services import BatchService, DocumentService, MatchService
+from core.services import (
+    BatchService,
+    DocumentProcessingError,
+    DocumentService,
+    MatchService,
+)
 from core.services.batch_service import BatchFile
 
 from .dependencies import (
@@ -40,6 +47,11 @@ from .dependencies import (
     get_matcher,
     get_vector_store,
     get_po_store,
+    require_api_key,
+    get_current_user,
+    require_roles,
+    require_company_user,
+    require_company_roles,
 )
 from .schemas import (
     BatchErrorDetail,
@@ -54,6 +66,12 @@ from .schemas import (
     MatchDetailResponse,
     ParseInfo,
     POIngestResponse,
+    LoginRequest,
+    CompanyCreateRequest,
+    UserCreateRequest,
+    PaymentCreateRequest,
+    PaymentReviewRequest,
+    PaymentResponse,
     ResultResponse,
     StatsResponse,
     ValidationIssueResponse,
@@ -62,7 +80,7 @@ from .schemas import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api", dependencies=[Depends(require_api_key)])
 
 UPLOAD_CHUNK_SIZE = 1024 * 1024
 
@@ -254,6 +272,9 @@ def ingest_contract(
             ),
         )
 
+    except (DocumentProcessingError, StoreError):
+        save_path.unlink(missing_ok=True)
+        raise
     except Exception:
         save_path.unlink(missing_ok=True)
         logger.exception("Contract ingestion failed")
@@ -318,6 +339,9 @@ def ingest_po(
             ),
         )
 
+    except (DocumentProcessingError, ExtractionError, StoreError):
+        save_path.unlink(missing_ok=True)
+        raise
     except Exception:
         save_path.unlink(missing_ok=True)
         logger.exception("Purchase order ingestion failed")
@@ -418,6 +442,9 @@ def process_invoice(
             ),
         )
 
+    except (DocumentProcessingError, ExtractionError):
+        save_path.unlink(missing_ok=True)
+        raise
     except Exception:
         save_path.unlink(missing_ok=True)
         logger.exception("Invoice processing failed")
@@ -565,7 +592,345 @@ def get_results(
     ]
 
 
+
+# ==================== USER AUTHENTICATION ====================
+
+@router.post("/auth/login", summary="Exchange user credentials for a short-lived access token")
+def login_user(
+    payload: LoginRequest,
+    request: Request,
+    db: Database = Depends(get_database),
+):
+    """Authenticate with persistent, per-email-and-client-IP throttling."""
+    from core.auth import create_access_token
+
+    client_ip = request.client.host if request.client else "unknown"
+    retry_after = db.login_rate_limit_remaining(payload.email, client_ip)
+    if retry_after > 0:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts. Please try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    user = db.authenticate_user(payload.email, payload.password)
+    if user is None:
+        db.record_failed_login(payload.email, client_ip)
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    db.clear_login_attempts(payload.email, client_ip)
+    if not settings.user_session_secret or len(settings.user_session_secret) < 32:
+        raise HTTPException(status_code=503, detail="User sessions are not configured. Set USER_SESSION_SECRET to a random secret of at least 32 characters.")
+    token = create_access_token(user, settings.user_session_secret, settings.user_session_ttl_seconds)
+    return {"access_token": token, "token_type": "bearer", "expires_in": settings.user_session_ttl_seconds, "user": user}
+
+
+@router.post("/companies", summary="Create a company tenant (administrator only)")
+def create_company_account(
+    payload: CompanyCreateRequest,
+    db: Database = Depends(get_database),
+    admin: dict = Depends(require_roles("ADMIN")),
+):
+    """Create a tenant container; existing unassigned records are not migrated automatically."""
+    try:
+        return db.create_company(**payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/auth/users", summary="Create a user account (administrator only)")
+def create_user_account(
+    payload: UserCreateRequest,
+    db: Database = Depends(get_database),
+    admin: dict = Depends(require_roles("ADMIN")),
+):
+    """Provision an account using an already authenticated administrator."""
+    try:
+        return db.create_user(**payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/auth/me", summary="Return the authenticated user profile")
+def get_authenticated_profile(user: dict = Depends(get_current_user)):
+    return user
+
+
 # ==================== STATISTICS ====================
+
+
+@router.post(
+    "/payments",
+    response_model=PaymentResponse,
+    summary="Record payment data for human review",
+    description="Stores a payment record in PENDING_REVIEW. This endpoint does not approve, execute, or authorize payment.",
+)
+def create_payment(
+    payload: PaymentCreateRequest,
+    db: Database = Depends(get_database),
+    user: dict = Depends(require_company_roles("ADMIN", "PREPARER")),
+):
+    try:
+        return db.create_payment_record(
+            **payload.model_dump(),
+            created_by_user_id=user["id"],
+            company_id=user["company_id"],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get(
+    "/payments",
+    response_model=list[PaymentResponse],
+    summary="List recorded payment data",
+    description="Returns recorded payment entries. PENDING_REVIEW is the only supported status in this initial release.",
+)
+def list_payments(
+    vendor_name: str | None = Query(None, min_length=1, max_length=255),
+    status: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+    db: Database = Depends(get_database),
+    user: dict = Depends(require_company_user),
+):
+    try:
+        return db.list_payment_records(
+            vendor_name=vendor_name,
+            status=status,
+            limit=limit,
+            company_id=user["company_id"],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post(
+    "/payments/{payment_id}/review",
+    summary="Record a human review disposition for a payment record",
+    description=(
+        "Records CLEAR or REJECT with a note. This does not authorize, execute, "
+        "block, or reverse a bank transfer. Reviewer identity is taken from the authenticated account."
+    ),
+)
+def review_payment(
+    payment_id: int,
+    payload: PaymentReviewRequest,
+    db: Database = Depends(get_database),
+    user: dict = Depends(require_company_roles("ADMIN", "REVIEWER", "APPROVER")),
+):
+    try:
+        return db.review_payment_record(
+            payment_id=payment_id,
+            decision=payload.decision,
+            reviewer_reference=user["email"],
+            note=payload.note,
+            reviewer_user_id=user["id"],
+            company_id=user["company_id"],
+        )
+    except ValueError as exc:
+        message = str(exc)
+        status_code = (
+            404 if "not found" in message.lower()
+            else 409 if "Only PENDING_REVIEW" in message or "cannot review their own payment" in message
+            else 422
+        )
+        raise HTTPException(status_code=status_code, detail=message) from exc
+
+
+@router.get(
+    "/payments/{payment_id}/reviews",
+    summary="List review history for a payment record",
+)
+def list_payment_reviews(
+    payment_id: int,
+    db: Database = Depends(get_database),
+    user: dict = Depends(require_company_user),
+):
+    try:
+        return db.list_payment_review_events(payment_id, company_id=user["company_id"])
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 422
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
+@router.get(
+    "/risk/payment-review-queue",
+    summary="Build a payment review queue from pending records and risk indicators",
+    description=(
+        "Combines pending payment records with duplicate and vendor bank-profile "
+        "review indicators. It is read-only and does not approve, block, or execute payments."
+    ),
+)
+def get_payment_review_queue(
+    vendor_name: str | None = Query(None, min_length=1, max_length=255),
+    limit: int = Query(100, ge=1, le=500),
+    db: Database = Depends(get_database),
+    user: dict = Depends(require_company_roles("ADMIN", "REVIEWER", "APPROVER", "AUDITOR")),
+):
+    try:
+        pending = db.list_payment_records(
+            vendor_name=vendor_name,
+            status="PENDING_REVIEW",
+            limit=limit,
+            company_id=user["company_id"],
+        )
+        duplicate_findings = db.find_duplicate_payment_candidates(
+            vendor_name=vendor_name,
+            limit=limit,
+            company_id=user["company_id"],
+        )
+        bank_findings = db.find_payment_bank_profile_mismatches(
+            vendor_name=vendor_name,
+            limit=limit,
+            company_id=user["company_id"],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    flags_by_payment: dict[int, list[str]] = {}
+    for finding in duplicate_findings:
+        for payment_id in finding.get("payment_ids", []):
+            flags_by_payment.setdefault(payment_id, []).append(
+                finding.get("rule", "duplicate_payment_candidate")
+            )
+    for finding in bank_findings:
+        payment_id = finding.get("payment_id")
+        if payment_id is not None:
+            flags_by_payment.setdefault(payment_id, []).append(
+                finding.get("rule", "vendor_bank_profile_mismatch")
+            )
+
+    queue = []
+    for payment in pending:
+        payment_id = payment.get("id")
+        flags = sorted(set(flags_by_payment.get(payment_id, [])))
+        queue.append({
+            **payment,
+            "risk_flags": flags,
+            "risk_review_required": bool(flags),
+        })
+
+    return {
+        "queue_type": "pending_payment_human_review",
+        "record_count": len(queue),
+        "flagged_count": sum(1 for item in queue if item["risk_review_required"]),
+        "records": queue,
+        "risk_findings": {
+            "duplicate_payment_candidates": duplicate_findings,
+            "vendor_bank_profile_mismatches": bank_findings,
+        },
+        "disclaimer": (
+            "Risk flags are indicators for human verification, not proof of fraud. "
+            "This read-only queue does not approve, block, execute, or reverse payments. "
+            "A payment record marked REVIEWED_CLEAR is not a bank instruction or proof "
+            "of organizational approval."
+        ),
+    }
+
+
+@router.get(
+    "/risk/payment-bank-mismatches",
+    summary="Find payment records with changed vendor bank fingerprints",
+    description="Compares supplied payment fingerprints with registered vendor profiles. Results require independent human verification and do not block or authorize payments.",
+)
+def get_payment_bank_mismatches(
+    vendor_name: str | None = Query(None, min_length=1, max_length=255),
+    limit: int = Query(100, ge=1, le=500),
+    db: Database = Depends(get_database),
+    user: dict = Depends(require_company_roles("ADMIN", "REVIEWER", "APPROVER", "AUDITOR")),
+):
+    try:
+        findings = db.find_payment_bank_profile_mismatches(
+            vendor_name=vendor_name,
+            limit=limit,
+            company_id=user["company_id"],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "analysis_type": "payment_bank_profile_mismatch_review",
+        "finding_count": len(findings),
+        "findings": findings,
+        "disclaimer": (
+            "Fingerprint mismatches are review indicators, not proof of fraud. "
+            "Verify beneficiary details through an independently trusted channel. "
+            "This endpoint does not block, authorize, execute, or reverse payments. "
+            "Records without a fingerprint or registered baseline cannot be compared."
+        ),
+    }
+
+
+@router.get(
+    "/risk/payment-duplicates",
+    summary="Find possible duplicate payment records",
+    description="Returns candidate duplicate indicators for human review; it does not block, reverse, or authorize payments.",
+)
+def get_payment_duplicate_candidates(
+    vendor_name: str | None = Query(None, min_length=1, max_length=255),
+    limit: int = Query(100, ge=1, le=500),
+    db: Database = Depends(get_database),
+    user: dict = Depends(require_company_roles("ADMIN", "REVIEWER", "APPROVER", "AUDITOR")),
+):
+    try:
+        findings = db.find_duplicate_payment_candidates(
+            vendor_name=vendor_name,
+            limit=limit,
+            company_id=user["company_id"],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "analysis_type": "payment_duplicate_review",
+        "finding_count": len(findings),
+        "findings": findings,
+        "disclaimer": (
+            "Candidate indicators only. Repeated invoice payments may be legitimate "
+            "installments, and payment references may be reused. Human verification "
+            "is required; payments are not blocked or authorized, and none are "
+            "reversed by this endpoint."
+        ),
+    }
+
+
+@router.get(
+    "/results/{result_id}/evidence",
+    summary="Retrieve validation explanation and supporting evidence",
+)
+def get_result_evidence(
+    result_id: int,
+    db: Database = Depends(get_database),
+):
+    evidence = db.get_result_evidence(result_id)
+    if evidence is None:
+        raise HTTPException(status_code=404, detail="Result not found.")
+    return evidence
+
+
+@router.get(
+    "/risk/invoice-patterns",
+    summary="Find repeated same-value invoice patterns",
+    description="Returns review indicators from stored invoice results; it does not detect or authorize payments.",
+)
+def get_invoice_patterns(
+    vendor_name: str | None = Query(None, min_length=1, max_length=255),
+    lookback_days: int = Query(7, ge=1, le=365),
+    min_occurrences: int = Query(3, ge=2, le=20),
+    db: Database = Depends(get_database),
+):
+    findings = db.find_suspicious_invoice_patterns(
+        lookback_days=lookback_days,
+        min_occurrences=min_occurrences,
+        vendor_name=vendor_name,
+    )
+    return {
+        "analysis_type": "invoice_pattern_review",
+        "lookback_basis": "result processing timestamp, not invoice date",
+        "lookback_days": lookback_days,
+        "min_occurrences": min_occurrences,
+        "finding_count": len(findings),
+        "findings": findings,
+        "disclaimer": "Indicators only. Repeated amounts may be legitimate recurring invoices. Human review is required; no payment records or payment authorization are involved.",
+    }
 
 
 @router.get(

@@ -100,6 +100,24 @@ uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload
 
 Full OpenAPI docs at `http://localhost:8000/docs` when running.
 
+### API access protection
+
+All `/api/*` endpoints require the shared `X-API-Key` header. Configure `API_AUTH_TOKEN` in your `.env` file before using the API. Generate a strong secret locally with:
+
+```bash
+openssl rand -hex 32
+```
+
+Do not commit the generated secret or share it in screenshots/logs. Docker Compose passes `API_AUTH_TOKEN` from the host environment into the API container. If the token is not configured, API routes fail closed with HTTP 503; missing or incorrect keys receive HTTP 401.
+
+This is a single shared deployment key, **not** individual user accounts, roles, or company-level data isolation. Do not treat it as multi-tenant SaaS authentication.
+
+Example:
+
+```bash
+curl -H "X-API-Key: $API_AUTH_TOKEN" http://localhost:8000/api/stats
+```
+
 ```bash
 # Ingest a contract
 curl -X POST http://localhost:8000/api/contracts/ingest \
@@ -126,6 +144,138 @@ curl "http://localhost:8000/api/results?status=FAIL&vendor_name=Acme"
 # System health
 curl http://localhost:8000/api/health
 ```
+
+## Human Review Gate
+
+Every extracted invoice and purchase order starts with `human_review_status: PENDING`.
+Extraction and matching results are decision support only; they do not constitute
+human approval or authorization to pay. A qualified reviewer must compare critical
+values against the original document before approval. The current schema records
+the pending state; reviewer identity, approval actions, immutable decision history,
+and field-level page citations are not yet implemented.
+
+## Vendor Bank-Detail Change Monitoring
+
+The SQLite metadata store can register a vendor's bank identity and compare later
+updates. A changed keyed fingerprint creates a `vendor_bank_details_changed`
+audit event and returns `REVIEW`; it is a warning for a human verifier, not a
+fraud finding or payment authorization. The stored profile contains the bank
+name, account suffix (last four digits), and an opaque fingerprint—not a full
+account or routing number.
+
+The caller must calculate `account_fingerprint` as an HMAC over consistently
+normalized bank details, using a secret held outside the database and source
+control. Do not pass raw account/routing numbers to this method. Plain hashes
+are not a substitute for HMAC. The current implementation provides the
+database-level registration and change-detection primitive; it does not yet
+provide a vendor-facing workflow, reviewer identity, approval/rejection action,
+or payment-system block. If the HMAC secret is unavailable or changes, do not
+silently register a new baseline—require controlled re-verification.
+
+## Payment Records (Initial Data-Capture Layer)
+
+Payment data is stored separately from invoice validation results. The
+authenticated API provides:
+
+- `POST /api/payments` to record a payment entry.
+- `GET /api/payments` to list entries, optionally filtered by vendor and status.
+
+New records always start as `PENDING_REVIEW`. The initial layer supports
+manual entry or imported payment data, positive amounts with up to two decimal
+places, a three-letter currency code, optional payment date/reference, and an
+optional link to a previously stored invoice result. When an invoice result is
+linked, the vendor and any supplied invoice number must match that result.
+
+The database stores an opaque keyed bank-account fingerprint only when the
+caller supplies one; it does not accept or return raw bank account details.
+Payment amounts use fixed-precision decimal storage. Each record creates an
+audit event.
+
+Example:
+
+```bash
+curl -X POST http://localhost:8000/api/payments \\
+  -H "X-API-Key: $API_AUTH_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"vendor_name":"Acme Corp","invoice_number":"INV-200","amount":"1250.50","currency":"USD","payment_reference":"BANK-REF-001","source":"MANUAL"}'
+
+curl -H "X-API-Key: $API_AUTH_TOKEN" \\
+  "http://localhost:8000/api/payments?vendor_name=Acme%20Corp"
+```
+
+
+## Consolidated Payment Review Queue
+
+The authenticated read-only endpoint `GET /api/risk/payment-review-queue`
+returns pending payment records together with risk indicators from the duplicate
+payment and vendor bank-profile mismatch checks. Each pending record includes
+`risk_flags` and `risk_review_required` so a reviewer can prioritize records
+with one or more indicators.
+
+Optional filters include `vendor_name` and `limit` (1–500). The response also
+includes the underlying findings for context. A record with no returned flags
+is not guaranteed to be safe; it only means these specific checks did not
+return an indicator for that record.
+
+The endpoint is read-only. It does not approve, block, execute, or reverse
+payments. Risk indicators are not proof of fraud, and `REVIEWED_CLEAR` is not
+a bank instruction or proof of organizational approval. Reviewer identity
+and role-based authorization remain outside the current shared-API-key model.
+
+Example:
+
+```bash
+curl -H "X-API-Key: $API_AUTH_TOKEN" \\
+  "http://localhost:8000/api/risk/payment-review-queue?limit=100"
+```
+
+## Payment Beneficiary Bank-Profile Checks
+
+The authenticated endpoint `GET /api/risk/payment-bank-mismatches` compares a
+payment record's supplied keyed bank-account fingerprint with the currently
+registered vendor bank profile. A mismatch is returned as `REVIEW`, with the
+registered bank name and account suffix as supporting context. The raw
+fingerprints are never returned.
+
+This check only works when both a payment record fingerprint and a registered
+vendor baseline exist. Missing fingerprints or missing baselines are not
+evidence of a match; those records cannot be compared by this rule. A mismatch
+may result from a legitimate bank-detail update or an incorrect/stale source
+record. Verify beneficiary details through an independently trusted contact
+channel before any payment action.
+
+The endpoint is read-only. It does not change the vendor baseline, block,
+approve, execute, or reverse a payment, and a mismatch is not proof of fraud.
+The caller remains responsible for generating fingerprints with a keyed HMAC
+and protecting the HMAC secret outside the database and source control.
+
+Example:
+
+```bash
+curl -H "X-API-Key: $API_AUTH_TOKEN" \\
+  "http://localhost:8000/api/risk/payment-bank-mismatches"
+```
+
+## Payment Duplicate Review Indicators
+
+The authenticated read-only endpoint `GET /api/risk/payment-duplicates`
+checks stored payment records for two candidate patterns:
+
+- The same non-empty payment reference for the same normalized vendor and currency.
+- The same normalized vendor, invoice number, amount, and currency appearing in multiple payment records.
+
+The endpoint returns the payment record IDs and supporting fields for human
+verification. It does not modify records, block or reverse a transfer, or
+conclude that fraud occurred. Repeated invoice payments can be legitimate
+installments, and some source systems may reuse payment references. The scan
+examines up to the 5,000 most recently recorded payment rows; use a vendor
+filter to narrow a review when appropriate.
+
+**Important limitations:** this is payment-data capture only. It does not connect
+to a bank, initiate or execute transfers, reconcile bank statements, approve or
+reject payments, or enforce segregation of duties. `PENDING_REVIEW` is a
+recording status—not proof that a payment is blocked or authorized. Payment
+risk rules and a reviewer decision workflow are separate future milestones.
 
 ## Evaluation Results
 
@@ -154,7 +304,7 @@ The matching engine is evaluated against 12 synthetic scenarios covering exact m
 | Batch Processing | Process 100 invoices concurrently with per-file error isolation |
 | REST API | 8 endpoints with OpenAPI docs, proper error codes (422/502/503) |
 | Analytics Dashboard | KPI cards, Plotly charts, filterable results table |
-| Audit Trail | Every action logged to SQLite with timestamps |
+| Audit Trail | Every action logged to SQLite with timestamps |\n| Payment Records | Separate payment-data register with review status and invoice linkage |
 | 100% Offline | No data leaves your machine -- local LLMs + local vector DB |
 
 ## Tech Stack
@@ -242,3 +392,107 @@ DocuMatch/
 ## License
 
 MIT
+
+
+## Procurement Risk Indicators
+
+The authenticated API endpoint `GET /api/risk/invoice-patterns` identifies repeated same-vendor, same-amount, same-currency invoice references in a configurable processing-time window. It returns the supporting result IDs and invoice references for human review.
+
+This is an invoice-pattern indicator only. The current data model does not store actual payment transactions, payment dates, payment approvals, or payment execution records; therefore this feature does not claim to detect suspicious payments. Repeated amounts can be legitimate recurring billing. The default window is 7 days and the default minimum is 3 distinct invoice references; both can be configured in the request. The window is based on result processing timestamps, not extracted invoice dates.
+
+
+
+### Validation explanations and evidence
+
+- Stored invoice validation results now include a deterministic severity summary and the serialized validation issues that support it.
+- Matched contract clause snippets and their existing metadata are retained where the matcher supplies them.
+- Retrieve a saved result's explanation and evidence with the authenticated endpoint `GET /api/results/{result_id}/evidence`.
+- The extraction pipeline does not yet retain reliable source page numbers, so the feature does not claim page-level traceability. Evidence is limited to data returned by the current parser and matcher.
+- A risk explanation is an aid to human review, not a fraud determination or payment approval.
+
+
+
+## Payment Human Review Dispositions
+
+The authenticated API supports a one-time human review disposition for a payment
+record that is still `PENDING_REVIEW`:
+
+- `POST /api/payments/{payment_id}/review` with `decision: CLEAR` or `REJECT`,
+  a reviewer reference, and a non-empty explanation.
+- The payment record becomes `REVIEWED_CLEAR` or `REVIEWED_REJECTED`.
+- `GET /api/payments/{payment_id}/reviews` returns the recorded review history.
+- Each decision creates a separate review-event row and an audit-log event.
+  A second decision cannot overwrite the first through this endpoint.
+
+A `CLEAR` disposition means only that the supplied reviewer marked the record
+clear at this review stage. It is **not** a bank instruction, payment execution,
+or proof that all required organizational approvals have been obtained.
+The current shared API-key authentication does not establish an individual's
+identity or enforce segregation of duties; `reviewer_reference` is caller-
+supplied metadata and must not be treated as verified identity. Production use
+requires individual authenticated accounts, role-based permissions, and
+independent approval controls.
+
+
+## Local User Identity Foundation (Not Yet API Authentication)
+
+The metadata database now includes a local `users` table with a unique normalized
+email, full name, role, active flag, creation timestamp, and a salted
+PBKDF2-HMAC-SHA256 password hash. Password hashing uses Python's standard
+library and a per-password random salt. Supported role labels are
+`ADMIN`, `PREPARER`, `REVIEWER`, `APPROVER`, and `AUDITOR`.
+
+The database layer provides user creation, credential verification, and
+non-secret user lookup primitives. Password hashes are never included in
+returned user dictionaries. User creation currently exists as an internal
+database operation only: there is no public registration endpoint, login
+endpoint, session/token issuance, role enforcement, MFA, account recovery,
+or verified reviewer identity in payment review routes yet. The existing
+shared `X-API-Key` remains the only API access gate. Do not treat this
+foundation as production-ready authentication or role-based access control.
+
+
+## Individual Login and Payment Role Controls
+
+The API now supports individual account login through `POST /api/auth/login`
+and profile lookup through `GET /api/auth/me`. Login returns a short-lived
+HMAC-SHA256 signed bearer token. Configure `USER_SESSION_SECRET` as a
+cryptographically random secret of at least 32 characters; the default token
+lifetime is 1,800 seconds (30 minutes), configurable with
+`USER_SESSION_TTL_SECONDS` from 60 to 86,400 seconds. Keep this secret outside
+source control and rotate it deliberately (rotation invalidates existing tokens).
+
+The existing `X-API-Key` remains required for all API routes, including login.
+Payment endpoints additionally require a valid individual bearer token:
+- Create payment: `ADMIN` or `PREPARER`
+- Review payment: `ADMIN`, `REVIEWER`, or `APPROVER`
+- Read payments/review history: any active authenticated user
+- Payment review queue: `ADMIN`, `REVIEWER`, `APPROVER`, or `AUDITOR`
+
+Reviewer identity is now taken from the authenticated account email; the caller
+cannot supply a different reviewer reference in the review request. User
+deactivation or role changes are checked against the database on each request,
+so a token does not preserve stale role permissions.
+
+**Current limitations:** user provisioning is still an internal database
+operation, not a public admin endpoint. There is no MFA, password reset,
+refresh-token flow, login rate limiting/lockout, per-company tenant isolation,
+or verified email process. Payment creator identity is not yet persisted, so
+segregation-of-duties (preventing a preparer from reviewing their own payment)
+is not yet enforced. The API key is still required alongside bearer tokens.
+This is a development security foundation, not a production security certification.
+
+
+### Account bootstrap and provisioning
+
+On a trusted machine/server console, create the first administrator with:
+
+```bash
+python scripts/create_admin.py
+```
+
+The command refuses to create another initial administrator if an ADMIN account
+already exists, prompts for the password without echoing it, and stores only
+the password hash. After login, an administrator can create additional accounts
+through `POST /api/auth/users`. Do not expose the bootstrap script as a web
+endpoint or run it on an untrusted machine.

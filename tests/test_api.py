@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from api.app import app
-from api.dependencies import get_batch_service, get_database, get_document_service, get_match_service
+from api.dependencies import get_batch_service, get_database, get_document_service, get_match_service, get_current_user
 from core.exceptions import StoreError
 from core.extraction import ExtractionError
 from core.models import (
@@ -31,6 +31,7 @@ from core.models import (
     ValidationIssue,
 )
 from core.services import DocumentProcessingError
+from config import settings
 
 
 # ==================== FIXTURES ====================
@@ -64,13 +65,15 @@ def mock_database():
 
 
 @pytest.fixture
-def client(mock_doc_service, mock_match_service, mock_batch_service, mock_database):
+def client(mock_doc_service, mock_match_service, mock_batch_service, mock_database, monkeypatch):
     """TestClient with mocked dependencies."""
+    monkeypatch.setattr(settings, "api_auth_token", "test-secret")
     app.dependency_overrides[get_document_service] = lambda: mock_doc_service
     app.dependency_overrides[get_match_service] = lambda: mock_match_service
     app.dependency_overrides[get_batch_service] = lambda: mock_batch_service
     app.dependency_overrides[get_database] = lambda: mock_database
-    yield TestClient(app)
+    app.dependency_overrides[get_current_user] = lambda: {"id": 1, "company_id": 1, "email": "admin@example.com", "full_name": "Test Admin", "role": "ADMIN", "is_active": True}
+    yield TestClient(app, headers={"X-API-Key": "test-secret"})
     app.dependency_overrides.clear()
 
 
@@ -155,6 +158,24 @@ def sample_three_way_result():
         ],
         matched_clauses=[],
     )
+
+
+# ==================== API AUTHENTICATION ====================
+
+class TestAPIAuthentication:
+    def test_rejects_missing_api_key(self, client):
+        response = client.get("/api/stats", headers={"X-API-Key": ""})
+        assert response.status_code == 401
+
+    def test_rejects_invalid_api_key(self, client):
+        response = client.get("/api/stats", headers={"X-API-Key": "wrong-secret"})
+        assert response.status_code == 401
+
+    def test_rejects_requests_when_server_secret_is_not_configured(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "api_auth_token", None)
+        response = client.get("/api/stats")
+        assert response.status_code == 503
+        assert "API_AUTH_TOKEN" in response.json()["detail"]
 
 
 # ==================== CONTRACT INGESTION ====================
@@ -403,11 +424,292 @@ class TestInvoiceProcess:
         assert v["issues"][0]["severity"] == "critical"
 
 
+class TestPaymentsAPI:
+    def test_payment_api_rejects_user_without_company_assignment(self, client, monkeypatch):
+        from api.dependencies import get_current_user
+        app.dependency_overrides[get_current_user] = lambda: {
+            "id": 9, "company_id": None, "email": "unassigned@example.com",
+            "full_name": "Unassigned", "role": "ADMIN", "is_active": True,
+        }
+        response = client.get("/api/payments")
+        assert response.status_code == 403
+
+    def test_create_payment_records_pending_review(self, client, mock_database):
+        mock_database.create_payment_record.return_value = {
+            "id": 7,
+            "vendor_name": "Acme Corp",
+            "invoice_number": "INV-200",
+            "invoice_result_id": 12,
+            "payment_reference": "BANK-REF-001",
+            "amount": "1250.50",
+            "currency": "USD",
+            "payment_date": "2026-11-08",
+            "source": "MANUAL",
+            "status": "PENDING_REVIEW",
+            "created_by_user_id": 1,
+            "created_at": "2026-11-08T12:00:00+00:00",
+        }
+
+        response = client.post(
+            "/api/payments",
+            json={
+                "vendor_name": "Acme Corp",
+                "invoice_result_id": 12,
+                "payment_reference": "BANK-REF-001",
+                "amount": "1250.50",
+                "currency": "usd",
+                "payment_date": "2026-11-08",
+                # A client-supplied creator ID must never override authenticated identity.
+                "created_by_user_id": 999,
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "PENDING_REVIEW"
+        assert data["amount"] == "1250.50"
+        assert data["currency"] == "USD"
+        assert data["created_by_user_id"] == 1
+        assert "bank_account_fingerprint" not in data
+        mock_database.create_payment_record.assert_called_once()
+        assert mock_database.create_payment_record.call_args.kwargs["created_by_user_id"] == 1
+        assert mock_database.create_payment_record.call_args.kwargs["company_id"] == 1
+
+    def test_create_payment_rejects_invalid_amount(self, client):
+        response = client.post(
+            "/api/payments",
+            json={"vendor_name": "Acme Corp", "amount": "0", "currency": "USD"},
+        )
+        assert response.status_code == 422
+
+    def test_create_payment_maps_link_validation_to_422(self, client, mock_database):
+        mock_database.create_payment_record.side_effect = ValueError(
+            "Linked invoice result was not found."
+        )
+        response = client.post(
+            "/api/payments",
+            json={
+                "vendor_name": "Acme Corp",
+                "invoice_result_id": 999,
+                "amount": "100.00",
+                "currency": "USD",
+            },
+        )
+        assert response.status_code == 422
+
+    def test_list_payments(self, client, mock_database):
+        mock_database.list_payment_records.return_value = [{
+            "id": 1,
+            "vendor_name": "Acme Corp",
+            "invoice_number": None,
+            "invoice_result_id": None,
+            "payment_reference": None,
+            "amount": "100.00",
+            "currency": "USD",
+            "payment_date": None,
+            "source": "MANUAL",
+            "status": "PENDING_REVIEW",
+            "created_at": "2026-11-08T12:00:00+00:00",
+        }]
+        response = client.get("/api/payments?vendor_name=Acme&limit=10")
+        assert response.status_code == 200
+        assert response.json()[0]["status"] == "PENDING_REVIEW"
+        mock_database.list_payment_records.assert_called_once_with(
+            vendor_name="Acme", status=None, limit=10, company_id=1,
+        )
+
+
+    def test_payment_review_endpoint_records_disposition(self, client, mock_database):
+        mock_database.review_payment_record.return_value = {
+            "payment": {"id": 5, "status": "REVIEWED_CLEAR"},
+            "review": {"id": 1, "payment_id": 5, "decision": "CLEAR"},
+            "payment_execution_authorized": False,
+        }
+        response = client.post("/api/payments/5/review", json={
+            "decision": "CLEAR",
+            "note": "Checked supporting documents.",
+        })
+        assert response.status_code == 200
+        assert response.json()["payment_execution_authorized"] is False
+        mock_database.review_payment_record.assert_called_once_with(
+            payment_id=5,
+            decision="CLEAR",
+            reviewer_reference="admin@example.com",
+            note="Checked supporting documents.",
+            reviewer_user_id=1,
+            company_id=1,
+        )
+
+    def test_payment_creator_cannot_review_own_payment(self, client, mock_database):
+        mock_database.review_payment_record.side_effect = ValueError(
+            "Payment creator cannot review their own payment (segregation of duties)."
+        )
+        response = client.post("/api/payments/5/review", json={
+            "decision": "CLEAR",
+            "note": "Attempted self-review.",
+        })
+        assert response.status_code == 409
+        mock_database.review_payment_record.assert_called_once_with(
+            payment_id=5,
+            decision="CLEAR",
+            reviewer_reference="admin@example.com",
+            note="Attempted self-review.",
+            reviewer_user_id=1,
+        )
+
+
+    def test_payment_duplicate_risk_endpoint_returns_review_indicators(self, client, mock_database):
+        mock_database.find_duplicate_payment_candidates.return_value = [{
+            "rule": "duplicate_payment_reference",
+            "status": "REVIEW",
+            "vendor_name": "Acme Corp",
+            "occurrences": 2,
+            "payment_ids": [1, 2],
+            "evidence": [{"payment_id": 1}, {"payment_id": 2}],
+            "explanation": "Verify the repeated payment reference.",
+        }]
+        response = client.get("/api/risk/payment-duplicates?vendor_name=Acme&limit=10")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["analysis_type"] == "payment_duplicate_review"
+        assert data["finding_count"] == 1
+        assert data["findings"][0]["status"] == "REVIEW"
+        assert "not blocked" in data["disclaimer"]
+        mock_database.find_duplicate_payment_candidates.assert_called_once_with(
+            vendor_name="Acme", limit=10, company_id=1,
+        )
+
+    def test_payment_duplicate_risk_endpoint_maps_invalid_filter_to_422(self, client, mock_database):
+        mock_database.find_duplicate_payment_candidates.side_effect = ValueError(
+            "limit must be between 1 and 500."
+        )
+        response = client.get("/api/risk/payment-duplicates?limit=0")
+        assert response.status_code == 422
+
+
+    def test_payment_bank_mismatch_endpoint_returns_review_indicator(self, client, mock_database):
+        mock_database.find_payment_bank_profile_mismatches.return_value = [{
+            "rule": "payment_bank_profile_mismatch",
+            "status": "REVIEW",
+            "payment_id": 9,
+            "vendor_name": "Acme Corp",
+            "registered_bank_name": "Example Bank",
+            "registered_account_last4": "1234",
+            "payment_authorized": False,
+        }]
+        response = client.get(
+            "/api/risk/payment-bank-mismatches?vendor_name=Acme&limit=5"
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["analysis_type"] == "payment_bank_profile_mismatch_review"
+        assert data["finding_count"] == 1
+        assert data["findings"][0]["status"] == "REVIEW"
+        assert "does not block" in data["disclaimer"]
+        mock_database.find_payment_bank_profile_mismatches.assert_called_once_with(
+            vendor_name="Acme", limit=5, company_id=1,
+        )
+
+    def test_payment_bank_mismatch_endpoint_maps_invalid_limit_to_422(
+        self, client, mock_database
+    ):
+        response = client.get("/api/risk/payment-bank-mismatches?limit=0")
+        assert response.status_code == 422
+        mock_database.find_payment_bank_profile_mismatches.assert_not_called()
+
+
+    def test_payment_review_queue_combines_pending_records_and_risk_flags(
+        self, client, mock_database
+    ):
+        mock_database.list_payment_records.return_value = [
+            {"id": 1, "vendor_name": "Acme Corp", "status": "PENDING_REVIEW"},
+            {"id": 2, "vendor_name": "Other Corp", "status": "PENDING_REVIEW"},
+        ]
+        mock_database.find_duplicate_payment_candidates.return_value = [
+            {"rule": "duplicate_payment_reference", "payment_ids": [1, 3]}
+        ]
+        mock_database.find_payment_bank_profile_mismatches.return_value = [
+            {"rule": "payment_bank_profile_mismatch", "payment_id": 2}
+        ]
+
+        response = client.get("/api/risk/payment-review-queue?limit=20")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["record_count"] == 2
+        assert data["flagged_count"] == 2
+        assert data["records"][0]["risk_flags"] == ["duplicate_payment_reference"]
+        assert data["records"][0]["risk_review_required"] is True
+        assert data["records"][1]["risk_flags"] == ["payment_bank_profile_mismatch"]
+        assert data["records"][1]["risk_review_required"] is True
+        assert "does not approve" in data["disclaimer"]
+        mock_database.list_payment_records.assert_called_once_with(
+            vendor_name=None, status="PENDING_REVIEW", limit=20, company_id=1
+        )
+        mock_database.find_duplicate_payment_candidates.assert_called_once_with(
+            vendor_name=None, limit=20, company_id=1
+        )
+        mock_database.find_payment_bank_profile_mismatches.assert_called_once_with(
+            vendor_name=None, limit=20, company_id=1
+        )
+
+    def test_payment_review_queue_marks_unflagged_pending_records(
+        self, client, mock_database
+    ):
+        mock_database.list_payment_records.return_value = [
+            {"id": 8, "vendor_name": "Vendor Z", "status": "PENDING_REVIEW"}
+        ]
+        mock_database.find_duplicate_payment_candidates.return_value = []
+        mock_database.find_payment_bank_profile_mismatches.return_value = []
+
+        response = client.get("/api/risk/payment-review-queue")
+
+        assert response.status_code == 200
+        record = response.json()["records"][0]
+        assert record["risk_flags"] == []
+        assert record["risk_review_required"] is False
+
+    def test_payment_review_queue_maps_database_validation_errors_to_422(
+        self, client, mock_database
+    ):
+        mock_database.list_payment_records.side_effect = ValueError(
+            "limit must be between 1 and 500."
+        )
+        response = client.get("/api/risk/payment-review-queue?limit=0")
+        assert response.status_code == 422
+
+
 # ==================== HEALTH CHECK ====================
 
 
 class TestHealthCheck:
     """Tests for GET /api/health."""
+
+    def test_cors_allows_configured_local_origin(self, client):
+        response = client.options(
+            "/api/health",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "content-type,x-api-key",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+        assert "x-api-key" in response.headers["access-control-allow-headers"].lower()
+        assert "access-control-allow-credentials" not in response.headers
+
+    def test_cors_rejects_unconfigured_origin(self, client):
+        response = client.options(
+            "/api/health",
+            headers={
+                "Origin": "https://untrusted.example",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+        assert "access-control-allow-origin" not in response.headers
 
     def test_healthy(self, client, mock_doc_service):
         response = client.get("/api/health")
@@ -441,7 +743,7 @@ class TestHealthCheck:
         data = response.json()
         assert data["status"] == "degraded"
         assert data["components"]["chromadb"]["status"] == "error"
-        assert "Connection refused" in data["components"]["chromadb"]["detail"]
+        assert data["components"]["chromadb"]["detail"] == "Health check failed"
 
     def test_pdfplumber_fallback(self, client, mock_doc_service):
         mock_doc_service.parser._docling_available = False
@@ -458,15 +760,21 @@ class TestHealthCheck:
 class TestBatchAPI:
     """Tests for batch processing API endpoints."""
 
-    def test_submit_batch(self, client, mock_batch_service):
+    def test_submit_batch(self, client, mock_batch_service, tmp_path, monkeypatch):
         mock_batch_service.submit_batch.return_value = 42
+        monkeypatch.setattr(settings, "invoices_dir", str(tmp_path))
+
+        invoice_one = tmp_path / "inv1.pdf"
+        invoice_two = tmp_path / "inv2.pdf"
+        invoice_one.write_bytes(b"%PDF-1.4 fake content")
+        invoice_two.write_bytes(b"%PDF-1.4 fake content")
 
         response = client.post(
             "/api/batch/process",
             json={
                 "files": [
-                    {"file_path": "/tmp/inv1.pdf", "po_number": "PO-001"},
-                    {"file_path": "/tmp/inv2.pdf"},
+                    {"file_path": str(invoice_one), "po_number": "PO-001"},
+                    {"file_path": str(invoice_two)},
                 ]
             },
         )
@@ -594,3 +902,119 @@ class TestResultsAPI:
         assert data["total_jobs"] == 10
         assert data["pass_rate"] == 0.8
         assert data["pass_count"] == 12
+
+
+class TestCompanyProvisioningAPI:
+    def test_admin_can_create_company(self, client, mock_database):
+        mock_database.create_company.return_value = {
+            "id": 12, "name": "Apex Global", "slug": "apex-global",
+            "is_active": True, "created_at": None,
+        }
+        response = client.post("/api/companies", json={
+            "name": "Apex Global", "slug": "apex-global",
+        })
+        assert response.status_code == 200
+        assert response.json()["id"] == 12
+        mock_database.create_company.assert_called_once_with(
+            name="Apex Global", slug="apex-global"
+        )
+
+    def test_company_creation_maps_validation_errors(self, client, mock_database):
+        mock_database.create_company.side_effect = ValueError("Company slug is invalid.")
+        response = client.post("/api/companies", json={
+            "name": "Apex Global", "slug": "apex-global",
+        })
+        assert response.status_code == 422
+
+    def test_user_provisioning_accepts_company_assignment(self, client, mock_database):
+        mock_database.create_user.return_value = {
+            "id": 13, "company_id": 12, "email": "member@example.com",
+            "full_name": "Company Member", "role": "REVIEWER",
+            "is_active": True, "created_at": None,
+        }
+        response = client.post("/api/auth/users", json={
+            "email": "member@example.com", "full_name": "Company Member",
+            "password": "a-strong-password-123", "role": "REVIEWER",
+            "company_id": 12,
+        })
+        assert response.status_code == 200
+        assert response.json()["company_id"] == 12
+        mock_database.create_user.assert_called_once()
+        assert mock_database.create_user.call_args.kwargs["company_id"] == 12
+
+
+class TestUserLoginAPI:
+    def test_login_returns_short_lived_bearer_token(self, client, mock_database, monkeypatch):
+        mock_database.login_rate_limit_remaining.return_value = 0
+        monkeypatch.setattr(settings, "user_session_secret", "test-session-secret-that-is-at-least-32-bytes")
+        monkeypatch.setattr(settings, "user_session_ttl_seconds", 1800)
+        mock_database.authenticate_user.return_value = {
+            "id": 3, "email": "reviewer@example.com", "full_name": "Reviewer",
+            "role": "REVIEWER", "is_active": True, "created_at": None,
+        }
+        response = client.post("/api/auth/login", json={
+            "email": "reviewer@example.com", "password": "correct-password"
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert data["token_type"] == "bearer"
+        assert data["expires_in"] == 1800
+        assert data["user"]["role"] == "REVIEWER"
+        assert "password" not in data["user"]
+        assert data["access_token"]
+
+    def test_login_throttles_after_five_failures(self, client, mock_database):
+        mock_database.login_rate_limit_remaining.return_value = 900
+        response = client.post("/api/auth/login", json={
+            "email": "reviewer@example.com", "password": "wrong-password"
+        })
+        assert response.status_code == 429
+        assert response.headers["Retry-After"] == "900"
+        mock_database.authenticate_user.assert_not_called()
+
+    def test_invalid_login_records_failure(self, client, mock_database):
+        mock_database.login_rate_limit_remaining.return_value = 0
+        mock_database.authenticate_user.return_value = None
+        response = client.post("/api/auth/login", json={
+            "email": "reviewer@example.com", "password": "wrong-password"
+        })
+        assert response.status_code == 401
+        mock_database.record_failed_login.assert_called_once_with(
+            "reviewer@example.com", "testclient"
+        )
+
+    def test_login_rejects_invalid_credentials(self, client, mock_database, monkeypatch):
+        mock_database.login_rate_limit_remaining.return_value = 0
+        monkeypatch.setattr(settings, "user_session_secret", "test-session-secret-that-is-at-least-32-bytes")
+        mock_database.authenticate_user.return_value = None
+        response = client.post("/api/auth/login", json={
+            "email": "reviewer@example.com", "password": "wrong-password"
+        })
+        assert response.status_code == 401
+
+    def test_login_requires_session_secret(self, client, mock_database, monkeypatch):
+        mock_database.login_rate_limit_remaining.return_value = 0
+        monkeypatch.setattr(settings, "user_session_secret", None)
+        mock_database.authenticate_user.return_value = {
+            "id": 3, "email": "reviewer@example.com", "full_name": "Reviewer",
+            "role": "REVIEWER", "is_active": True,
+        }
+        response = client.post("/api/auth/login", json={
+            "email": "reviewer@example.com", "password": "correct-password"
+        })
+        assert response.status_code == 503
+
+
+    def test_admin_can_create_user_account(self, client, mock_database):
+        mock_database.create_user.return_value = {
+            "id": 8, "email": "preparer@example.com", "full_name": "Preparer",
+            "role": "PREPARER", "is_active": True, "created_at": None,
+        }
+        response = client.post("/api/auth/users", json={
+            "email": "preparer@example.com", "full_name": "Preparer",
+            "password": "a-strong-password-123", "role": "PREPARER",
+        })
+        assert response.status_code == 200
+        assert response.json()["role"] == "PREPARER"
+        assert "password_hash" not in response.json()
+        mock_database.create_user.assert_called_once()

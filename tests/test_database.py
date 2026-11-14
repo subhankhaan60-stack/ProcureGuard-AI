@@ -6,10 +6,12 @@ Uses temp directories so each test gets a fresh database.
 """
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 import pytest
 from pathlib import Path
 
-from core.database import AuditLog, Base, Database, Job, Result
+from core.database import AuditLog, Base, Database, Job, LoginAttempt, Result
 
 
 # ==================== FIXTURES ====================
@@ -242,6 +244,51 @@ class TestResultOperations:
         passed = db.get_results(status="PASS")
         assert len(passed) == 2
 
+    def test_find_duplicate_invoice_matches_vendor_and_number_case_insensitively(self, db):
+        job = db.create_job(job_type="invoice_process")
+        db.save_result(
+            job_id=job.id,
+            invoice_file="first.pdf",
+            vendor_name=" Acme Corp ",
+            invoice_number=" inv-001 ",
+            status="PASS",
+        )
+
+        duplicate = db.find_duplicate_invoice("acme corp", "INV-001")
+
+        assert duplicate is not None
+        assert duplicate["job_id"] == job.id
+        assert duplicate["invoice_file"] == "first.pdf"
+        assert duplicate["vendor_name"] == " Acme Corp "
+        assert duplicate["invoice_number"] == " inv-001 "
+
+    def test_find_duplicate_invoice_does_not_match_different_vendor_or_number(self, db):
+        job = db.create_job(job_type="invoice_process")
+        db.save_result(
+            job_id=job.id,
+            vendor_name="Acme Corp",
+            invoice_number="INV-001",
+        )
+
+        assert db.find_duplicate_invoice("Other Vendor", "INV-001") is None
+        assert db.find_duplicate_invoice("Acme Corp", "INV-002") is None
+
+    def test_find_duplicate_invoice_can_exclude_current_job(self, db):
+        job = db.create_job(job_type="invoice_process")
+        db.save_result(
+            job_id=job.id,
+            vendor_name="Acme Corp",
+            invoice_number="INV-001",
+        )
+
+        assert db.find_duplicate_invoice(
+            "Acme Corp", "INV-001", exclude_job_id=job.id
+        ) is None
+
+    def test_find_duplicate_invoice_ignores_blank_identity_fields(self, db):
+        assert db.find_duplicate_invoice("", "INV-001") is None
+        assert db.find_duplicate_invoice("Acme Corp", "   ") is None
+
     def test_job_result_cascade_delete(self, db):
         """Deleting a job should delete its results."""
         job = db.create_job(job_type="invoice_process")
@@ -364,6 +411,32 @@ class TestStats:
 class TestConcurrency:
     """Tests for concurrent access patterns."""
 
+    def test_concurrent_duplicate_identity_is_serialized(self, db):
+        """Only the first concurrent save may be stored without REVIEW."""
+        jobs = [
+            db.create_job(job_type="invoice_process"),
+            db.create_job(job_type="invoice_process"),
+        ]
+        barrier = Barrier(2)
+
+        def save(job):
+            barrier.wait(timeout=5)
+            return db.save_result_with_duplicate_check(
+                job_id=job.id,
+                invoice_file=f"{job.id}.pdf",
+                vendor_name="Acme Corp",
+                invoice_number="INV-RACE-001",
+                status="PASS",
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(save, jobs))
+
+        statuses = sorted(result.status for result, _ in results)
+        assert statuses == ["PASS", "REVIEW"]
+        assert sum(duplicate is not None for _, duplicate in results) == 1
+        assert len(db.get_results()) == 2
+
     def test_multiple_sessions(self, db):
         """Multiple sessions should work without conflicts (WAL mode)."""
         job = db.create_job(job_type="invoice_process")
@@ -378,3 +451,752 @@ class TestConcurrency:
         with db.session() as s2:
             j2 = s2.get(Job, job.id)
             assert j2.status == "COMPLETE"
+
+
+
+# ==================== VENDOR BANK-DETAIL MONITORING ====================
+
+
+class TestVendorBankDetailMonitoring:
+    def test_first_bank_profile_is_registered_without_alert(self, db):
+        result = db.record_vendor_bank_details(
+            "Acme Corp", "Example Bank", "1234", "hmac-v1:initial"
+        )
+        assert result["status"] == "REGISTERED"
+        assert result["review_required"] is False
+
+    def test_changed_bank_fingerprint_creates_review_alert(self, db):
+        db.record_vendor_bank_details(
+            "Acme Corp", "Example Bank", "1234", "hmac-v1:initial"
+        )
+        result = db.record_vendor_bank_details(
+            " ACME CORP ", "New Bank", "9876", "hmac-v1:changed"
+        )
+        assert result["status"] == "REVIEW"
+        assert result["review_required"] is True
+        assert result["previous"] == {
+            "bank_name": "Example Bank", "account_last4": "1234"
+        }
+        assert result["current"] == {
+            "bank_name": "New Bank", "account_last4": "9876"
+        }
+        logs = db.get_audit_log(entity_type="vendor")
+        alert = next(log for log in logs if log.action == "vendor_bank_details_changed")
+        metadata = json.loads(alert.extra_data)
+        assert metadata["review_required"] is True
+        assert metadata["payment_authorized"] is False
+
+    def test_same_fingerprint_does_not_create_alert(self, db):
+        db.record_vendor_bank_details(
+            "Acme Corp", "Example Bank", "1234", "hmac-v1:initial"
+        )
+        result = db.record_vendor_bank_details(
+            "Acme Corp", "Example Bank", "1234", "hmac-v1:initial"
+        )
+        assert result["status"] == "UNCHANGED"
+        assert result["review_required"] is False
+
+    def test_invalid_bank_identity_is_rejected(self, db):
+        with pytest.raises(ValueError):
+            db.record_vendor_bank_details(
+                "Acme Corp", "Example Bank", "12345", "hmac-v1:initial"
+            )
+
+
+class TestSuspiciousInvoicePatterns:
+    def test_finds_repeated_same_vendor_amount_distinct_invoice_numbers(self, db):
+        for number in ("INV-A", "INV-B", "INV-C"):
+            job = db.create_job(job_type="invoice_process")
+            db.save_result(
+                job_id=job.id,
+                vendor_name="Acme Corp",
+                invoice_number=number,
+                status="PASS",
+                details={"total_amount": 1250.00, "currency": "USD"},
+            )
+        findings = db.find_suspicious_invoice_patterns()
+        assert len(findings) == 1
+        assert findings[0]["rule"] == "repeated_same_vendor_amount"
+        assert findings[0]["occurrences"] == 3
+        assert {item["invoice_number"] for item in findings[0]["evidence"]} == {"INV-A", "INV-B", "INV-C"}
+        assert findings[0]["status"] == "REVIEW"
+
+    def test_does_not_flag_different_currency_or_amount(self, db):
+        for number, amount, currency in (
+            ("INV-A", 100, "USD"),
+            ("INV-B", 100, "EUR"),
+            ("INV-C", 101, "USD"),
+        ):
+            job = db.create_job(job_type="invoice_process")
+            db.save_result(job_id=job.id, vendor_name="Acme", invoice_number=number,
+                           details={"total_amount": amount, "currency": currency})
+        assert db.find_suspicious_invoice_patterns() == []
+
+    def test_same_invoice_identity_does_not_inflate_pattern_count(self, db):
+        job = db.create_job(job_type="invoice_process")
+        for _ in range(3):
+            db.save_result(job_id=job.id, vendor_name="Acme", invoice_number="INV-1",
+                           details={"total_amount": 100, "currency": "USD"})
+        assert db.find_suspicious_invoice_patterns() == []
+
+    def test_validates_detection_parameters(self, db):
+        with pytest.raises(ValueError):
+            db.find_suspicious_invoice_patterns(lookback_days=0)
+        with pytest.raises(ValueError):
+            db.find_suspicious_invoice_patterns(min_occurrences=1)
+
+
+
+class TestPaymentRecords:
+    def test_records_payment_for_review_and_audits_without_raw_bank_data(self, db):
+        from datetime import date
+
+        job = db.create_job(job_type="invoice_process")
+        invoice = db.save_result(
+            job_id=job.id,
+            vendor_name="Acme Corp",
+            invoice_number="INV-200",
+            status="PASS",
+        )
+        payment = db.create_payment_record(
+            vendor_name="Acme Corp",
+            invoice_result_id=invoice.id,
+            payment_reference="BANK-REF-001",
+            amount="1250.50",
+            currency="usd",
+            payment_date=date(2026, 11, 8),
+            bank_account_fingerprint="opaque-keyed-hmac",
+            source="IMPORT",
+        )
+
+        assert payment["vendor_name"] == "Acme Corp"
+        assert payment["invoice_number"] == "INV-200"
+        assert payment["invoice_result_id"] == invoice.id
+        assert payment["amount"] == "1250.50"
+        assert payment["currency"] == "USD"
+        assert payment["payment_date"] == "2026-11-08"
+        assert payment["source"] == "IMPORT"
+        assert payment["status"] == "PENDING_REVIEW"
+        assert "bank_account_fingerprint" not in payment
+
+        audit = db.get_audit_log(entity_type="payment", limit=5)
+        assert any(
+            entry.action == "payment_recorded"
+            and entry.audit_metadata["payment_authorized"] is False
+            for entry in audit
+        )
+
+    @pytest.mark.parametrize("amount", ["0", "-1", "not-a-number", "12.345"])
+    def test_rejects_invalid_payment_amount(self, db, amount):
+        with pytest.raises(ValueError):
+            db.create_payment_record(
+                vendor_name="Acme Corp", amount=amount, currency="USD"
+            )
+
+    def test_rejects_invalid_currency_and_source(self, db):
+        with pytest.raises(ValueError):
+            db.create_payment_record(
+                vendor_name="Acme Corp", amount="10.00", currency="US"
+            )
+        with pytest.raises(ValueError):
+            db.create_payment_record(
+                vendor_name="Acme Corp", amount="10.00", currency="USD",
+                source="EXECUTED",
+            )
+
+    def test_rejects_missing_or_mismatched_invoice_link(self, db):
+        with pytest.raises(ValueError, match="not found"):
+            db.create_payment_record(
+                vendor_name="Acme Corp", amount="10.00", currency="USD",
+                invoice_result_id=999,
+            )
+
+        job = db.create_job(job_type="invoice_process")
+        invoice = db.save_result(
+            job_id=job.id, vendor_name="Different Vendor",
+            invoice_number="INV-1", status="PASS",
+        )
+        with pytest.raises(ValueError, match="does not match"):
+            db.create_payment_record(
+                vendor_name="Acme Corp", amount="10.00", currency="USD",
+                invoice_result_id=invoice.id,
+            )
+
+    def test_lists_payment_records_with_filters(self, db):
+        db.create_payment_record(
+            vendor_name="Acme Corp", amount="10.00", currency="USD"
+        )
+        db.create_payment_record(
+            vendor_name="Other Corp", amount="20.00", currency="GBP"
+        )
+
+        rows = db.list_payment_records(vendor_name="acme corp")
+        assert len(rows) == 1
+        assert rows[0]["vendor_name"] == "Acme Corp"
+        assert db.list_payment_records(status="PENDING_REVIEW")[0]["status"] == "PENDING_REVIEW"
+
+    def test_rejects_unsupported_payment_status_filter(self, db):
+        with pytest.raises(ValueError):
+            db.list_payment_records(status="EXECUTED")
+
+    def test_records_clear_review_and_preserves_review_history(self, db):
+        payment = db.create_payment_record(
+            vendor_name="Acme Corp", amount="125.00", currency="USD"
+        )
+        result = db.review_payment_record(
+            payment_id=payment["id"],
+            decision="CLEAR",
+            reviewer_reference="reviewer-01",
+            note="Invoice and supporting documents independently checked.",
+        )
+        assert result["payment"]["status"] == "REVIEWED_CLEAR"
+        assert result["payment_execution_authorized"] is False
+        assert result["review"]["decision"] == "CLEAR"
+        history = db.list_payment_review_events(payment["id"])
+        assert len(history) == 1
+        assert history[0]["reviewer_reference"] == "reviewer-01"
+
+    def test_creator_cannot_review_own_payment_but_another_user_can(self, db):
+        creator = db.create_user(
+            email="creator@example.com",
+            full_name="Payment Creator",
+            password="creator-password-123",
+            role="PREPARER",
+        )
+        reviewer = db.create_user(
+            email="reviewer@example.com",
+            full_name="Independent Reviewer",
+            password="reviewer-password-123",
+            role="REVIEWER",
+        )
+        payment = db.create_payment_record(
+            vendor_name="SoD Test Vendor",
+            amount="250.00",
+            currency="USD",
+            created_by_user_id=creator["id"],
+        )
+
+        with pytest.raises(ValueError, match="cannot review their own payment"):
+            db.review_payment_record(
+                payment_id=payment["id"],
+                decision="CLEAR",
+                reviewer_reference=creator["email"],
+                reviewer_user_id=creator["id"],
+                note="Attempted self-review.",
+            )
+
+        # A rejected self-review must leave the payment pending and create no review event.
+        assert db.list_payment_records(status="PENDING_REVIEW")[0]["id"] == payment["id"]
+        assert db.list_payment_review_events(payment["id"]) == []
+
+        result = db.review_payment_record(
+            payment_id=payment["id"],
+            decision="CLEAR",
+            reviewer_reference=reviewer["email"],
+            reviewer_user_id=reviewer["id"],
+            note="Independently reviewed supporting evidence.",
+        )
+        assert result["payment"]["status"] == "REVIEWED_CLEAR"
+        assert result["payment"]["created_by_user_id"] == creator["id"]
+        assert result["review"]["reviewer_reference"] == reviewer["email"]
+
+
+    def test_rejects_second_review_decision_and_invalid_review_data(self, db):
+        payment = db.create_payment_record(
+            vendor_name="Acme Corp", amount="125.00", currency="USD"
+        )
+        db.review_payment_record(
+            payment_id=payment["id"], decision="REJECT",
+            reviewer_reference="reviewer-02", note="Beneficiary mismatch.",
+        )
+        with pytest.raises(ValueError, match="Only PENDING_REVIEW"):
+            db.review_payment_record(
+                payment_id=payment["id"], decision="CLEAR",
+                reviewer_reference="reviewer-03", note="Changed mind.",
+            )
+        with pytest.raises(ValueError):
+            db.review_payment_record(
+                payment_id=999, decision="CLEAR",
+                reviewer_reference="reviewer-03", note="Not found.",
+            )
+        with pytest.raises(ValueError):
+            db.review_payment_record(
+                payment_id=payment["id"], decision="CLEAR",
+                reviewer_reference="", note="Missing reviewer.",
+            )
+
+
+
+class TestDuplicatePaymentCandidates:
+    def test_flags_repeated_payment_reference_for_same_vendor_and_currency(self, db):
+        for _ in range(2):
+            db.create_payment_record(
+                vendor_name="Acme Corp", payment_reference="BANK-REF-9",
+                amount="100.00", currency="USD",
+            )
+        findings = db.find_duplicate_payment_candidates()
+        reference_findings = [
+            item for item in findings if item["rule"] == "duplicate_payment_reference"
+        ]
+        assert len(reference_findings) == 1
+        assert reference_findings[0]["status"] == "REVIEW"
+        assert reference_findings[0]["occurrences"] == 2
+        assert len(reference_findings[0]["payment_ids"]) == 2
+
+    def test_flags_same_invoice_amount_and_currency_recorded_twice(self, db):
+        for _ in range(2):
+            db.create_payment_record(
+                vendor_name="Acme Corp", invoice_number="INV-55",
+                amount="250.00", currency="USD",
+            )
+        findings = db.find_duplicate_payment_candidates()
+        invoice_findings = [
+            item for item in findings if item["rule"] == "repeated_invoice_payment"
+        ]
+        assert len(invoice_findings) == 1
+        assert invoice_findings[0]["invoice_number"] == "INV-55"
+        assert invoice_findings[0]["amount"] == "250.00"
+        assert invoice_findings[0]["occurrences"] == 2
+
+    def test_does_not_group_different_vendor_currency_or_invoice_amount(self, db):
+        db.create_payment_record(
+            vendor_name="Acme Corp", invoice_number="INV-1",
+            amount="100.00", currency="USD", payment_reference="REF-1",
+        )
+        db.create_payment_record(
+            vendor_name="Other Corp", invoice_number="INV-2",
+            amount="100.00", currency="USD", payment_reference="REF-2",
+        )
+        db.create_payment_record(
+            vendor_name="Acme Corp", invoice_number="INV-3",
+            amount="100.00", currency="EUR", payment_reference="REF-3",
+        )
+        db.create_payment_record(
+            vendor_name="Acme Corp", invoice_number="INV-1",
+            amount="101.00", currency="USD", payment_reference="REF-4",
+        )
+        # Same reference is only compared within vendor and currency; invoice
+        # amount rule additionally requires the same amount.
+        findings = db.find_duplicate_payment_candidates()
+        assert not any(
+            item["rule"] == "repeated_invoice_payment" for item in findings
+        )
+        assert not any(
+            item["rule"] == "duplicate_payment_reference"
+            and item["vendor_name"] == "Acme Corp"
+            and item["currency"] == "USD"
+            for item in findings
+        )
+
+    def test_vendor_filter_and_limit_validation(self, db):
+        for vendor in ("Acme Corp", "Other Corp"):
+            for _ in range(2):
+                db.create_payment_record(
+                    vendor_name=vendor, payment_reference="SAME-REF",
+                    amount="10.00", currency="USD",
+                )
+        findings = db.find_duplicate_payment_candidates(vendor_name="acme corp")
+        assert all(item["vendor_name"] == "Acme Corp" for item in findings)
+        with pytest.raises(ValueError):
+            db.find_duplicate_payment_candidates(limit=0)
+
+
+class TestResultEvidence:
+    def test_get_result_evidence_returns_stored_details(self, db):
+        job = db.create_job(job_type="invoice_process")
+        result = db.save_result(
+            job_id=job.id,
+            vendor_name="Acme Corp",
+            invoice_number="INV-100",
+            status="REVIEW",
+            details={
+                "risk_explanation": {
+                    "summary": "One warning requires review.",
+                    "severity_counts": {"critical": 0, "error": 0, "warning": 1, "info": 0},
+                },
+                "issue_evidence": [{"rule": "price_variance", "severity": "warning"}],
+            },
+        )
+        evidence = db.get_result_evidence(result.id)
+        assert evidence["result_id"] == result.id
+        assert evidence["details"]["risk_explanation"]["severity_counts"]["warning"] == 1
+        assert evidence["details"]["issue_evidence"][0]["rule"] == "price_variance"
+
+    def test_get_result_evidence_returns_none_for_unknown_id(self, db):
+        assert db.get_result_evidence(999999) is None
+
+    def test_get_result_evidence_rejects_non_positive_id(self, db):
+        assert db.get_result_evidence(0) is None
+
+
+
+
+class TestPaymentBankProfileMismatch:
+    def test_flags_payment_fingerprint_different_from_registered_profile(self, db):
+        db.record_vendor_bank_details(
+            "Acme Corp", "Example Bank", "1234", "hmac:registered"
+        )
+        db.create_payment_record(
+            vendor_name="Acme Corp", amount="500.00", currency="USD",
+            payment_reference="PAY-001",
+            bank_account_fingerprint="hmac:unrecognized",
+        )
+        findings = db.find_payment_bank_profile_mismatches()
+        assert len(findings) == 1
+        finding = findings[0]
+        assert finding["rule"] == "payment_bank_profile_mismatch"
+        assert finding["status"] == "REVIEW"
+        assert finding["registered_bank_name"] == "Example Bank"
+        assert finding["registered_account_last4"] == "1234"
+        assert finding["payment_authorized"] is False
+        assert "hmac:" not in json.dumps(finding)
+
+    def test_matching_fingerprint_is_not_flagged(self, db):
+        db.record_vendor_bank_details(
+            "Acme Corp", "Example Bank", "1234", "hmac:same"
+        )
+        db.create_payment_record(
+            vendor_name="Acme Corp", amount="500.00", currency="USD",
+            bank_account_fingerprint="hmac:same",
+        )
+        assert db.find_payment_bank_profile_mismatches() == []
+
+    def test_missing_profile_or_payment_fingerprint_is_not_compared(self, db):
+        db.record_vendor_bank_details(
+            "Acme Corp", "Example Bank", "1234", "hmac:registered"
+        )
+        db.create_payment_record(
+            vendor_name="Acme Corp", amount="500.00", currency="USD"
+        )
+        db.create_payment_record(
+            vendor_name="Other Corp", amount="700.00", currency="USD",
+            bank_account_fingerprint="hmac:unknown",
+        )
+        assert db.find_payment_bank_profile_mismatches() == []
+
+    def test_vendor_filter_and_limit_validation(self, db):
+        db.record_vendor_bank_details(
+            "Acme Corp", "Example Bank", "1234", "hmac:registered"
+        )
+        db.record_vendor_bank_details(
+            "Other Corp", "Other Bank", "5678", "hmac:registered-2"
+        )
+        for vendor in ("Acme Corp", "Other Corp"):
+            db.create_payment_record(
+                vendor_name=vendor, amount="10.00", currency="USD",
+                bank_account_fingerprint="hmac:changed",
+            )
+        findings = db.find_payment_bank_profile_mismatches(vendor_name="acme corp")
+        assert len(findings) == 1
+        assert findings[0]["vendor_name"] == "Acme Corp"
+        with pytest.raises(ValueError):
+            db.find_payment_bank_profile_mismatches(limit=0)
+
+
+class TestCompanyTenantFoundation:
+    def test_creates_company_and_audits_creation(self, db):
+        company = db.create_company("Apex Global", "apex-global")
+        assert company["name"] == "Apex Global"
+        assert company["slug"] == "apex-global"
+        assert company["is_active"] is True
+        assert db.get_company(company["id"])["slug"] == "apex-global"
+        audit = db.get_audit_log(entity_type="company", limit=5)
+        assert any(
+            row.action == "company_created"
+            and row.audit_metadata["slug"] == "apex-global"
+            for row in audit
+        )
+
+    def test_rejects_duplicate_or_invalid_company_slug(self, db):
+        db.create_company("Apex Global", "apex-global")
+        with pytest.raises(ValueError, match="already exists"):
+            db.create_company("Another Name", "apex-global")
+        with pytest.raises(ValueError, match="slug"):
+            db.create_company("Invalid", "Not A Slug")
+
+    def test_links_user_to_active_company(self, db):
+        company = db.create_company("Apex Global", "apex-global")
+        user = db.create_user(
+            email="tenant-user@example.com",
+            full_name="Tenant User",
+            password="a-long-test-password",
+            role="REVIEWER",
+            company_id=company["id"],
+        )
+        assert user["company_id"] == company["id"]
+        assert db.get_user(user["id"])["company_id"] == company["id"]
+
+    def test_rejects_unknown_company_for_user(self, db):
+        with pytest.raises(ValueError, match="active company"):
+            db.create_user(
+                email="orphan@example.com",
+                full_name="Orphan User",
+                password="a-long-test-password",
+                role="REVIEWER",
+                company_id=999999,
+            )
+
+
+class TestLocalUserIdentityFoundation:
+    def test_creates_user_with_hashed_password_and_audit_event(self, db):
+        user = db.create_user(
+            email="Reviewer@Example.com",
+            full_name="Test Reviewer",
+            password="a-long-test-password",
+            role="REVIEWER",
+        )
+        assert user["email"] == "reviewer@example.com"
+        assert user["role"] == "REVIEWER"
+        assert "password" not in user
+        assert "password_hash" not in user
+        assert db.authenticate_user(
+            "REVIEWER@example.com", "a-long-test-password"
+        )["id"] == user["id"]
+        assert db.authenticate_user(
+            "reviewer@example.com", "incorrect-password"
+        ) is None
+        audit = db.get_audit_log(entity_type="user", limit=5)
+        assert any(
+            row.action == "user_created" and row.audit_metadata["role"] == "REVIEWER"
+            for row in audit
+        )
+
+    def test_rejects_duplicate_email_and_unsupported_role(self, db):
+        db.create_user(
+            email="admin@example.com", full_name="Admin User",
+            password="another-long-password", role="ADMIN",
+        )
+        with pytest.raises(ValueError, match="already exists"):
+            db.create_user(
+                email="ADMIN@example.com", full_name="Duplicate",
+                password="another-long-password", role="REVIEWER",
+            )
+        with pytest.raises(ValueError, match="role"):
+            db.create_user(
+                email="badrole@example.com", full_name="Bad Role",
+                password="another-long-password", role="SUPERUSER",
+            )
+
+    @pytest.mark.parametrize("password", ["short", "", None])
+    def test_rejects_weak_or_missing_password(self, db, password):
+        with pytest.raises(ValueError, match="Password"):
+            db.create_user(
+                email="new@example.com", full_name="New User",
+                password=password, role="REVIEWER",
+            )
+
+    def test_unknown_user_and_bad_credentials_fail_authentication(self, db):
+        assert db.authenticate_user("missing@example.com", "password") is None
+        assert db.authenticate_user("bad-email", "password") is None
+
+
+class TestPasswordHashing:
+    def test_hashes_are_salted_and_verifiable(self):
+        from core.auth import hash_password, verify_password
+
+        first = hash_password("correct horse battery staple")
+        second = hash_password("correct horse battery staple")
+        assert first != second
+        assert verify_password("correct horse battery staple", first)
+        assert not verify_password("wrong password", first)
+        assert not verify_password("correct horse battery staple", "malformed")
+
+
+class TestSignedAccessTokens:
+    def test_token_round_trip_and_tamper_rejection(self):
+        from core.auth import create_access_token, decode_access_token
+
+        user = {"id": 42, "email": "reviewer@example.com", "role": "REVIEWER"}
+        secret = "test-session-secret-that-is-at-least-32-bytes"
+        token = create_access_token(user, secret, 300)
+        claims = decode_access_token(token, secret)
+        assert claims["sub"] == "42"
+        assert claims["email"] == user["email"]
+        assert claims["role"] == user["role"]
+        assert decode_access_token(token + "x", secret) is None
+        assert decode_access_token(token, "different-secret-that-is-also-32-bytes") is None
+
+    def test_token_requires_strong_secret_and_valid_lifetime(self):
+        from core.auth import create_access_token
+
+        user = {"id": 1, "email": "admin@example.com", "role": "ADMIN"}
+        with pytest.raises(ValueError, match="32 characters"):
+            create_access_token(user, "weak")
+        with pytest.raises(ValueError, match="lifetime"):
+            create_access_token(user, "strong-session-secret-at-least-32-chars", 10)
+
+
+
+# ==================== LOGIN THROTTLING ====================
+
+
+class TestLoginThrottling:
+    def test_locks_after_five_failures_for_same_email_and_ip(self, db):
+        from datetime import datetime, timezone
+
+        now = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
+        for _ in range(4):
+            assert db.record_failed_login("User@example.com", "203.0.113.10", now) == 0
+        assert db.record_failed_login("user@example.com", "203.0.113.10", now) == 900
+        assert db.login_rate_limit_remaining("USER@example.com", "203.0.113.10", now) == 900
+
+    def test_different_ip_has_separate_throttle_key(self, db):
+        from datetime import datetime, timezone
+
+        now = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
+        for _ in range(5):
+            db.record_failed_login("user@example.com", "203.0.113.10", now)
+        assert db.login_rate_limit_remaining("user@example.com", "203.0.113.11", now) == 0
+
+    def test_successful_login_clears_attempts(self, db):
+        from datetime import datetime, timezone
+
+        now = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
+        for _ in range(5):
+            db.record_failed_login("user@example.com", "203.0.113.10", now)
+        db.clear_login_attempts("user@example.com", "203.0.113.10")
+        assert db.login_rate_limit_remaining("user@example.com", "203.0.113.10", now) == 0
+
+    def test_concurrent_failures_cannot_bypass_lockout_threshold(self, db):
+        from datetime import datetime, timezone
+
+        now = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
+        barrier = Barrier(8)
+
+        def record_failure(_):
+            barrier.wait(timeout=5)
+            return db.record_failed_login(
+                "race@example.com", "203.0.113.20", now
+            )
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(record_failure, range(8)))
+
+        # Four attempts are accepted; the fifth atomically starts lockout.
+        # Remaining concurrent requests observe the lockout and cannot add attempts.
+        assert results.count(0) == 4
+        assert results.count(900) == 4
+        assert db.login_rate_limit_remaining(
+            "race@example.com", "203.0.113.20", now
+        ) == 900
+
+    def test_expired_lockout_allows_new_attempts(self, db):
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
+        for _ in range(5):
+            db.record_failed_login("user@example.com", "203.0.113.10", now)
+        later = now + timedelta(minutes=16)
+        assert db.login_rate_limit_remaining("user@example.com", "203.0.113.10", later) == 0
+        assert db.record_failed_login("user@example.com", "203.0.113.10", later) == 0
+
+
+class TestBusinessRecordTenantColumns:
+    """Tenant ownership columns exist without guessing legacy ownership."""
+
+    def test_company_id_columns_exist_on_business_records(self, db):
+        from sqlalchemy import inspect
+
+        inspector = inspect(db.engine)
+        for table in ("jobs", "payments", "vendor_bank_profiles", "audit_log"):
+            columns = {column["name"]: column for column in inspector.get_columns(table)}
+            assert "company_id" in columns
+            assert columns["company_id"]["nullable"] is True
+
+    def test_new_business_record_tenant_columns_default_to_unassigned(self, db):
+        from core.database import Job, Payment, VendorBankProfile, AuditLog
+
+        with db.session() as session:
+            job = Job(type="invoice_process", status="PENDING")
+            payment = Payment(
+                vendor_name="Tenant Test Vendor",
+                amount=100,
+                currency="USD",
+                status="PENDING_REVIEW",
+            )
+            profile = VendorBankProfile(
+                vendor_key="tenant test vendor",
+                vendor_name="Tenant Test Vendor",
+                bank_name="Test Bank",
+                account_last4="1234",
+                account_fingerprint="test-fingerprint",
+            )
+            audit = AuditLog(action="tenant_test")
+            session.add_all([job, payment, profile, audit])
+            session.commit()
+
+            assert job.company_id is None
+            assert payment.company_id is None
+            assert profile.company_id is None
+            assert audit.company_id is None
+
+
+class TestPaymentTenantIsolation:
+    def test_payment_list_is_limited_to_requested_company(self, db):
+        first = db.create_company("First Tenant", "first-tenant")
+        second = db.create_company("Second Tenant", "second-tenant")
+        db.create_payment_record(
+            vendor_name="Shared Vendor",
+            amount="100.00",
+            currency="USD",
+            payment_reference="PAY-FIRST",
+            company_id=first["id"],
+        )
+        db.create_payment_record(
+            vendor_name="Shared Vendor",
+            amount="200.00",
+            currency="USD",
+            payment_reference="PAY-SECOND",
+            company_id=second["id"],
+        )
+
+        first_records = db.list_payment_records(company_id=first["id"])
+        second_records = db.list_payment_records(company_id=second["id"])
+
+        assert [record["payment_reference"] for record in first_records] == ["PAY-FIRST"]
+        assert [record["payment_reference"] for record in second_records] == ["PAY-SECOND"]
+
+    def test_company_cannot_review_another_company_payment(self, db):
+        first = db.create_company("First Review Tenant", "first-review-tenant")
+        second = db.create_company("Second Review Tenant", "second-review-tenant")
+        payment = db.create_payment_record(
+            vendor_name="Shared Vendor",
+            amount="100.00",
+            currency="USD",
+            company_id=second["id"],
+        )
+
+        with pytest.raises(ValueError, match="Payment record was not found"):
+            db.review_payment_record(
+                payment_id=payment["id"],
+                decision="CLEAR",
+                reviewer_reference="reviewer@example.com",
+                note="Cross-tenant access test.",
+                company_id=first["id"],
+            )
+
+        assert db.list_payment_records(company_id=second["id"])[0]["status"] == "PENDING_REVIEW"
+
+
+class TestVendorBankTenantIsolation:
+    def test_same_vendor_has_separate_bank_baselines_per_company(self, db):
+        first = db.create_company("Bank Tenant One", "bank-tenant-one")
+        second = db.create_company("Bank Tenant Two", "bank-tenant-two")
+
+        first_result = db.record_vendor_bank_details(
+            vendor_name="Shared Supplier",
+            bank_name="Bank A",
+            account_last4="1111",
+            account_fingerprint="fingerprint-a",
+            company_id=first["id"],
+        )
+        second_result = db.record_vendor_bank_details(
+            vendor_name="Shared Supplier",
+            bank_name="Bank B",
+            account_last4="2222",
+            account_fingerprint="fingerprint-b",
+            company_id=second["id"],
+        )
+
+        assert first_result["status"] == "REGISTERED"
+        assert second_result["status"] == "REGISTERED"

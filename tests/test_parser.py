@@ -51,6 +51,40 @@ class TestParserEngine:
         finally:
             Path(temp_path).unlink()
 
+    def test_rejects_file_with_pdf_extension_but_invalid_content(self, tmp_path):
+        parser = ParserEngine()
+        invalid_pdf = tmp_path / "not_really_a_pdf.pdf"
+        invalid_pdf.write_bytes(b"This is not a PDF document")
+
+        result = parser.parse_to_markdown(str(invalid_pdf))
+
+        assert result.success is False
+        assert "pdf header not found" in result.error_message.lower()
+        assert result.markdown == ""
+
+    def test_rejects_directory_with_pdf_suffix(self, tmp_path):
+        parser = ParserEngine()
+        pdf_directory = tmp_path / "folder.pdf"
+        pdf_directory.mkdir()
+
+        result = parser.parse_to_markdown(str(pdf_directory))
+
+        assert result.success is False
+        assert "regular file" in result.error_message.lower()
+
+    def test_rejects_pdf_above_configured_size_limit(self, tmp_path, monkeypatch):
+        from config import settings
+
+        parser = ParserEngine()
+        oversized_pdf = tmp_path / "oversized.pdf"
+        oversized_pdf.write_bytes(b"%PDF-1.4\ncontent")
+        monkeypatch.setattr(settings, "max_file_size_mb", 0)
+
+        result = parser.parse_to_markdown(str(oversized_pdf))
+
+        assert result.success is False
+        assert "file too large" in result.error_message.lower()
+
     def test_parse_result_model(self):
         """Test ParseResult model creation."""
         result = ParseResult(

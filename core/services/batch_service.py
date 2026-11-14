@@ -147,6 +147,7 @@ class BatchService:
                 job_type="invoice_process",
                 file_name=batch_file.file_path,
                 vendor_name=None,  # Will be extracted
+                parent_job_id=parent_id,
             )
             child_ids.append((child_job.id, batch_file))
 
@@ -206,6 +207,15 @@ class BatchService:
                     f"Batch {parent_id}: unexpected error for "
                     f"{batch_file.file_path}: {e}"
                 )
+
+        # Mark queued children that were never submitted as cancelled.
+        if cancel_event.is_set():
+            for child_id, _ in child_ids:
+                child = self.database.get_job(child_id)
+                if child and child.status == "PENDING":
+                    self.database.update_job_status(
+                        child_id, "FAILED", error="Cancelled"
+                    )
 
         # Finalize parent job
         if cancel_event.is_set():
@@ -269,12 +279,51 @@ class BatchService:
                 return
             self.database.update_job_status(job_id, "MATCHING")
 
+            # Validate first, then atomically check identity and persist.
+            # SQLite's write reservation prevents concurrent workers from
+            # both recording the same vendor/invoice identity as a first hit.
             result = self.match_service.validate_three_way(
                 invoice, po_number=batch_file.po_number
             )
 
-            # Save result to database
-            self.database.save_result(
+            issue_evidence = [
+                issue.model_dump(mode="json")
+                for issue in result.all_issues
+            ]
+            matched_clause_evidence = [
+                clause.model_dump(mode="json")
+                for clause in result.matched_clauses
+            ]
+            severity_counts = {
+                severity: sum(1 for issue in result.all_issues if issue.severity == severity)
+                for severity in ("critical", "error", "warning", "info")
+            }
+            result_details = {
+                "total_amount": invoice.total_amount,
+                "currency": invoice.currency,
+                "po_number": batch_file.po_number or invoice.po_number,
+                "issues_count": len(result.all_issues),
+                "validation_status_before_duplicate_check": result.status,
+                "risk_explanation": {
+                    "status": result.status,
+                    "summary": (
+                        f"{len(result.all_issues)} validation issue(s) were identified; "
+                        f"{severity_counts['critical']} critical, {severity_counts['error']} error, "
+                        f"{severity_counts['warning']} warning, and {severity_counts['info']} informational."
+                    ),
+                    "severity_counts": severity_counts,
+                    "human_review_required": result.status in ("FAIL", "REVIEW") or bool(result.all_issues),
+                    "limitations": [
+                        "Findings are indicators for human review, not a fraud conclusion.",
+                        "Source page numbers are not currently retained by the extraction pipeline.",
+                    ],
+                },
+                "issue_evidence": issue_evidence,
+                "matched_clause_evidence": matched_clause_evidence,
+            }
+
+            # Duplicate candidates are routed to REVIEW, never labelled fraud.
+            self.database.save_result_with_duplicate_check(
                 job_id=job_id,
                 invoice_file=file_path,
                 vendor_name=invoice.vendor_name,
@@ -283,11 +332,7 @@ class BatchService:
                 confidence=result.overall_score,
                 matches_passed=result.matches_passed,
                 total_matches=result.total_matches,
-                details={
-                    "total_amount": invoice.total_amount,
-                    "po_number": batch_file.po_number,
-                    "issues_count": len(result.all_issues),
-                },
+                details=result_details,
             )
 
             # COMPLETE
@@ -316,30 +361,19 @@ class BatchService:
         if not parent or parent.type != "batch_process":
             return None
 
-        # Get all child jobs for this batch
-        # Child jobs are invoice_process jobs created right after the batch job
+        # Parent-child linkage prevents unrelated concurrent jobs from
+        # being included in this batch's progress or error report.
         with self.database.session() as session:
             from ..database import Job
-            children = (
+            batch_children = (
                 session.query(Job)
                 .filter(
                     Job.type == "invoice_process",
-                    Job.id > batch_id,
+                    Job.parent_job_id == batch_id,
                 )
                 .order_by(Job.id)
                 .all()
             )
-
-            # Find children that belong to this batch
-            # (created between this batch and the next batch or end)
-            next_batch = (
-                session.query(Job)
-                .filter(Job.type == "batch_process", Job.id > batch_id)
-                .order_by(Job.id)
-                .first()
-            )
-            max_child_id = next_batch.id if next_batch else float("inf")
-            batch_children = [c for c in children if c.id < max_child_id]
 
         total = len(batch_children)
         completed = sum(1 for c in batch_children if c.status == "COMPLETE")

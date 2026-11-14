@@ -170,6 +170,41 @@ class TestProcessSingleFile:
         call_kwargs = mock_match_service.validate_three_way.call_args
         assert call_kwargs[1]["po_number"] == "PO-001"
 
+    def test_previously_processed_duplicate_is_saved_for_review(
+        self, batch_service, db
+    ):
+        """A repeated vendor/invoice identity must be flagged for human review."""
+        from threading import Event
+
+        previous_job = db.create_job(job_type="invoice_process", file_name="prior.pdf")
+        db.save_result(
+            job_id=previous_job.id,
+            invoice_file="prior.pdf",
+            vendor_name="Acme Corp",
+            invoice_number="INV-001",
+            status="PASS",
+        )
+
+        current_job = db.create_job(job_type="invoice_process", file_name="repeat.pdf")
+        batch_service._process_single_file(
+            current_job.id,
+            BatchFile(file_path="repeat.pdf"),
+            Event(),
+        )
+
+        current = db.get_results(job_id=current_job.id)[0]
+        assert current.status == "REVIEW"
+        assert current.details["validation_status_before_duplicate_check"] == "PASS"
+        duplicate = current.details["duplicate_invoice_candidate"]
+        assert duplicate["job_id"] == previous_job.id
+        assert duplicate["invoice_number"] == "INV-001"
+
+        # The result must explicitly remain a review indicator, not a fraud conclusion.
+        explanation = current.details["risk_explanation"]
+        assert explanation["human_review_required"] is True
+        assert any("not a fraud conclusion" in item for item in explanation["limitations"])
+        assert "fraud" not in str(duplicate).lower()
+
     def test_processing_error_isolates_failure(self, batch_service, db, mock_doc_service):
         """A processing error should mark the job as FAILED, not crash."""
         from threading import Event
@@ -223,9 +258,10 @@ class TestBatchStatus:
         db.update_job_status(parent.id, "PARSING")
 
         # Create child jobs
-        child1 = db.create_job(job_type="invoice_process", file_name="inv1.pdf")
-        child2 = db.create_job(job_type="invoice_process", file_name="inv2.pdf")
-        child3 = db.create_job(job_type="invoice_process", file_name="inv3.pdf")
+        child1 = db.create_job(job_type="invoice_process", file_name="inv1.pdf", parent_job_id=parent.id)
+        unrelated = db.create_job(job_type="invoice_process", file_name="unrelated.pdf")
+        child2 = db.create_job(job_type="invoice_process", file_name="inv2.pdf", parent_job_id=parent.id)
+        child3 = db.create_job(job_type="invoice_process", file_name="inv3.pdf", parent_job_id=parent.id)
 
         # Simulate progress
         db.update_job_status(child1.id, "COMPLETE")
@@ -241,14 +277,15 @@ class TestBatchStatus:
         assert status.processing == 0
         assert len(status.errors) == 1
         assert status.errors[0]["error"] == "Parse error"
+        assert unrelated.status == "PENDING"
 
     def test_status_with_processing_jobs(self, batch_service, db):
         """Jobs in intermediate states count as processing."""
         parent = db.create_job(job_type="batch_process", file_name="2 files")
         db.update_job_status(parent.id, "PARSING")
 
-        child1 = db.create_job(job_type="invoice_process", file_name="inv1.pdf")
-        child2 = db.create_job(job_type="invoice_process", file_name="inv2.pdf")
+        child1 = db.create_job(job_type="invoice_process", file_name="inv1.pdf", parent_job_id=parent.id)
+        child2 = db.create_job(job_type="invoice_process", file_name="inv2.pdf", parent_job_id=parent.id)
 
         db.update_job_status(child1.id, "EXTRACTING")  # In progress
         # child2 stays PENDING

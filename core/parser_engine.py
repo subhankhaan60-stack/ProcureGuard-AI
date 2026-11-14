@@ -63,15 +63,36 @@ class ParserEngine:
         """
         path = Path(file_path)
 
-        # Validate file exists
-        if not path.exists():
+        # Validate that the input is an existing regular file.
+        try:
+            if not path.exists():
+                return ParseResult(
+                    markdown="",
+                    page_count=0,
+                    tables_found=0,
+                    parse_method="docling",
+                    success=False,
+                    error_message=f"File not found: {file_path}",
+                    file_path=str(path)
+                )
+            if not path.is_file():
+                return ParseResult(
+                    markdown="",
+                    page_count=0,
+                    tables_found=0,
+                    parse_method="docling",
+                    success=False,
+                    error_message="PDF path must point to a regular file.",
+                    file_path=str(path)
+                )
+        except OSError as exc:
             return ParseResult(
                 markdown="",
                 page_count=0,
                 tables_found=0,
                 parse_method="docling",
                 success=False,
-                error_message=f"File not found: {file_path}",
+                error_message=f"Unable to inspect PDF file: {exc}",
                 file_path=str(path)
             )
 
@@ -87,8 +108,47 @@ class ParserEngine:
                 file_path=str(path)
             )
 
-        # Enforce max file size to prevent MemoryError
-        file_size = path.stat().st_size
+        # Reject files that only have a .pdf extension but are not PDF documents.
+        # The PDF specification permits the header to appear within the first 1024 bytes.
+        try:
+            with path.open("rb") as source:
+                header = source.read(1024)
+        except OSError as exc:
+            return ParseResult(
+                markdown="",
+                page_count=0,
+                tables_found=0,
+                parse_method="docling",
+                success=False,
+                error_message=f"Unable to read PDF file: {exc}",
+                file_path=str(path)
+            )
+
+        if b"%PDF-" not in header:
+            return ParseResult(
+                markdown="",
+                page_count=0,
+                tables_found=0,
+                parse_method="docling",
+                success=False,
+                error_message="Invalid PDF file: PDF header not found.",
+                file_path=str(path)
+            )
+
+        # Enforce max file size to limit parser memory and CPU exposure.
+        try:
+            file_size = path.stat().st_size
+        except OSError as exc:
+            return ParseResult(
+                markdown="",
+                page_count=0,
+                tables_found=0,
+                parse_method="docling",
+                success=False,
+                error_message=f"Unable to inspect PDF file size: {exc}",
+                file_path=str(path)
+            )
+
         if file_size > settings.max_file_size_bytes:
             size_mb = file_size / (1024 * 1024)
             return ParseResult(
