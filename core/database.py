@@ -288,6 +288,15 @@ class Database:
                 connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN parent_job_id INTEGER REFERENCES jobs(id)")
                 connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_jobs_parent_job_id ON jobs(parent_job_id)")
 
+            # Vendor keys are unique only within a company, not globally.
+            connection.exec_driver_sql(
+                "DROP INDEX IF EXISTS ix_vendor_bank_profiles_vendor_key"
+            )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_vendor_bank_profiles_vendor_key "
+                "ON vendor_bank_profiles(vendor_key)"
+            )
+
             # Backward-compatible tenant ownership for business records.
             # Existing rows remain NULL until an administrator verifies ownership.
             for table_name in ("jobs", "vendor_bank_profiles", "payments", "audit_log"):
