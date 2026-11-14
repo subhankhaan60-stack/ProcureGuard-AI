@@ -1176,3 +1176,27 @@ class TestPaymentTenantIsolation:
             )
 
         assert db.list_payment_records(company_id=second["id"])[0]["status"] == "PENDING_REVIEW"
+
+
+class TestVendorBankTenantIsolation:
+    def test_same_vendor_has_separate_bank_baselines_per_company(self, db):
+        first = db.create_company("Bank Tenant One", "bank-tenant-one")
+        second = db.create_company("Bank Tenant Two", "bank-tenant-two")
+
+        first_result = db.record_vendor_bank_details(
+            vendor_name="Shared Supplier",
+            bank_name="Bank A",
+            account_last4="1111",
+            account_fingerprint="fingerprint-a",
+            company_id=first["id"],
+        )
+        second_result = db.record_vendor_bank_details(
+            vendor_name="Shared Supplier",
+            bank_name="Bank B",
+            account_last4="2222",
+            account_fingerprint="fingerprint-b",
+            company_id=second["id"],
+        )
+
+        assert first_result["status"] == "REGISTERED"
+        assert second_result["status"] == "REGISTERED"
