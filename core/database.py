@@ -1099,7 +1099,7 @@ class Database:
                 "company_id": company_id,
                 "bank_fingerprint_supplied": fingerprint is not None,
                 "payment_authorized": False,
-            })
+            }, company_id=company_id)
             session.commit()
             session.refresh(payment)
             return self._payment_dict(payment)
@@ -1213,7 +1213,7 @@ class Database:
                 "reviewer_user_id": reviewer_user_id,
                 "status": final_status,
                 "payment_execution_authorized": False,
-            })
+            }, company_id=payment.company_id)
             session.commit()
             session.refresh(payment)
             return {
@@ -1314,6 +1314,7 @@ class Database:
         self,
         vendor_name: Optional[str] = None,
         limit: int = 100,
+        company_id: Optional[int] = None,
     ) -> list[dict]:
         """
         Identify possible duplicate payment records for human review.
@@ -1331,6 +1332,8 @@ class Database:
 
         with self.session() as session:
             query = session.query(Payment)
+            if company_id is not None:
+                query = query.filter(Payment.company_id == company_id)
             if vendor_name and vendor_name.strip():
                 query = query.filter(
                     func.upper(func.trim(Payment.vendor_name))
@@ -1426,9 +1429,11 @@ class Database:
         entity_type: Optional[str] = None,
         entity_id: Optional[str] = None,
         metadata: Optional[dict] = None,
+        company_id: Optional[int] = None,
     ):
         """Add an audit log entry (called within an existing session)."""
         log = AuditLog(
+            company_id=company_id,
             action=action,
             entity_type=entity_type,
             entity_id=entity_id,
