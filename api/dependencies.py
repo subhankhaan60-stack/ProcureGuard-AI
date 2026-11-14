@@ -143,3 +143,14 @@ def require_roles(*allowed_roles: str):
         return user
 
     return check_role
+
+
+def require_company_user(user: dict = Depends(get_current_user)) -> dict:
+    """Reject identities without an active tenant assignment for business APIs."""
+    company_id = user.get("company_id")
+    if not isinstance(company_id, int) or company_id <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your user account is not assigned to an active company tenant.",
+        )
+    return user
