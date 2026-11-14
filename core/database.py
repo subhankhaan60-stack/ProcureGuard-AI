@@ -716,6 +716,7 @@ class Database:
         bank_name: str,
         account_last4: str,
         account_fingerprint: str,
+        company_id: Optional[int] = None,
     ) -> dict:
         """
         Register or compare a vendor bank identity.
@@ -735,11 +736,17 @@ class Database:
         vendor_key = name.casefold()
         with self.session() as session:
             session.connection().exec_driver_sql("BEGIN IMMEDIATE")
-            profile = session.query(VendorBankProfile).filter(
+            profile_query = session.query(VendorBankProfile).filter(
                 VendorBankProfile.vendor_key == vendor_key
-            ).first()
+            )
+            if company_id is not None:
+                profile_query = profile_query.filter(
+                    VendorBankProfile.company_id == company_id
+                )
+            profile = profile_query.first()
             if profile is None:
                 profile = VendorBankProfile(
+                    company_id=company_id,
                     vendor_key=vendor_key,
                     vendor_name=name,
                     bank_name=bank,
@@ -749,7 +756,7 @@ class Database:
                 session.add(profile)
                 self._audit(session, "vendor_bank_details_registered", "vendor", vendor_key, {
                     "bank_name": bank, "account_last4": last4,
-                })
+                }, company_id=company_id)
                 session.commit()
                 return {"status": "REGISTERED", "review_required": False, "vendor_name": name}
 
@@ -768,7 +775,7 @@ class Database:
                     "current": {"bank_name": bank, "account_last4": last4},
                     "review_required": True,
                     "payment_authorized": False,
-                })
+                }, company_id=company_id)
             session.commit()
             return {
                 "status": "REVIEW" if changed else "UNCHANGED",
