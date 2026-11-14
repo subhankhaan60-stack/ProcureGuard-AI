@@ -72,7 +72,7 @@ def client(mock_doc_service, mock_match_service, mock_batch_service, mock_databa
     app.dependency_overrides[get_match_service] = lambda: mock_match_service
     app.dependency_overrides[get_batch_service] = lambda: mock_batch_service
     app.dependency_overrides[get_database] = lambda: mock_database
-    app.dependency_overrides[get_current_user] = lambda: {"id": 1, "email": "admin@example.com", "full_name": "Test Admin", "role": "ADMIN", "is_active": True}
+    app.dependency_overrides[get_current_user] = lambda: {"id": 1, "company_id": 1, "email": "admin@example.com", "full_name": "Test Admin", "role": "ADMIN", "is_active": True}
     yield TestClient(app, headers={"X-API-Key": "test-secret"})
     app.dependency_overrides.clear()
 
@@ -425,6 +425,15 @@ class TestInvoiceProcess:
 
 
 class TestPaymentsAPI:
+    def test_payment_api_rejects_user_without_company_assignment(self, client, monkeypatch):
+        from api.dependencies import get_current_user
+        app.dependency_overrides[get_current_user] = lambda: {
+            "id": 9, "company_id": None, "email": "unassigned@example.com",
+            "full_name": "Unassigned", "role": "ADMIN", "is_active": True,
+        }
+        response = client.get("/api/payments")
+        assert response.status_code == 403
+
     def test_create_payment_records_pending_review(self, client, mock_database):
         mock_database.create_payment_record.return_value = {
             "id": 7,
@@ -464,6 +473,7 @@ class TestPaymentsAPI:
         assert "bank_account_fingerprint" not in data
         mock_database.create_payment_record.assert_called_once()
         assert mock_database.create_payment_record.call_args.kwargs["created_by_user_id"] == 1
+        assert mock_database.create_payment_record.call_args.kwargs["company_id"] == 1
 
     def test_create_payment_rejects_invalid_amount(self, client):
         response = client.post(
@@ -505,7 +515,7 @@ class TestPaymentsAPI:
         assert response.status_code == 200
         assert response.json()[0]["status"] == "PENDING_REVIEW"
         mock_database.list_payment_records.assert_called_once_with(
-            vendor_name="Acme", status=None, limit=10,
+            vendor_name="Acme", status=None, limit=10, company_id=1,
         )
 
 
@@ -527,6 +537,7 @@ class TestPaymentsAPI:
             reviewer_reference="admin@example.com",
             note="Checked supporting documents.",
             reviewer_user_id=1,
+            company_id=1,
         )
 
     def test_payment_creator_cannot_review_own_payment(self, client, mock_database):
@@ -565,7 +576,7 @@ class TestPaymentsAPI:
         assert data["findings"][0]["status"] == "REVIEW"
         assert "not blocked" in data["disclaimer"]
         mock_database.find_duplicate_payment_candidates.assert_called_once_with(
-            vendor_name="Acme", limit=10,
+            vendor_name="Acme", limit=10, company_id=1,
         )
 
     def test_payment_duplicate_risk_endpoint_maps_invalid_filter_to_422(self, client, mock_database):
@@ -596,7 +607,7 @@ class TestPaymentsAPI:
         assert data["findings"][0]["status"] == "REVIEW"
         assert "does not block" in data["disclaimer"]
         mock_database.find_payment_bank_profile_mismatches.assert_called_once_with(
-            vendor_name="Acme", limit=5,
+            vendor_name="Acme", limit=5, company_id=1,
         )
 
     def test_payment_bank_mismatch_endpoint_maps_invalid_limit_to_422(
@@ -633,7 +644,7 @@ class TestPaymentsAPI:
         assert data["records"][1]["risk_review_required"] is True
         assert "does not approve" in data["disclaimer"]
         mock_database.list_payment_records.assert_called_once_with(
-            vendor_name=None, status="PENDING_REVIEW", limit=20
+            vendor_name=None, status="PENDING_REVIEW", limit=20, company_id=1
         )
 
     def test_payment_review_queue_marks_unflagged_pending_records(
