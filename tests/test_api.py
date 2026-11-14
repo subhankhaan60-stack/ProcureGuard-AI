@@ -646,6 +646,12 @@ class TestPaymentsAPI:
         mock_database.list_payment_records.assert_called_once_with(
             vendor_name=None, status="PENDING_REVIEW", limit=20, company_id=1
         )
+        mock_database.find_duplicate_payment_candidates.assert_called_once_with(
+            vendor_name=None, limit=20, company_id=1
+        )
+        mock_database.find_payment_bank_profile_mismatches.assert_called_once_with(
+            vendor_name=None, limit=20, company_id=1
+        )
 
     def test_payment_review_queue_marks_unflagged_pending_records(
         self, client, mock_database
