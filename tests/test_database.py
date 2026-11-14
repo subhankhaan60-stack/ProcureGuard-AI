@@ -1089,3 +1089,43 @@ class TestLoginThrottling:
         later = now + timedelta(minutes=16)
         assert db.login_rate_limit_remaining("user@example.com", "203.0.113.10", later) == 0
         assert db.record_failed_login("user@example.com", "203.0.113.10", later) == 0
+
+
+class TestBusinessRecordTenantColumns:
+    """Tenant ownership columns exist without guessing legacy ownership."""
+
+    def test_company_id_columns_exist_on_business_records(self, db):
+        from sqlalchemy import inspect
+
+        inspector = inspect(db.engine)
+        for table in ("jobs", "payments", "vendor_bank_profiles", "audit_log"):
+            columns = {column["name"]: column for column in inspector.get_columns(table)}
+            assert "company_id" in columns
+            assert columns["company_id"]["nullable"] is True
+
+    def test_new_business_record_tenant_columns_default_to_unassigned(self, db):
+        from core.database import Job, Payment, VendorBankProfile, AuditLog
+
+        with db.session() as session:
+            job = Job(type="invoice_process", status="PENDING")
+            payment = Payment(
+                vendor_name="Tenant Test Vendor",
+                amount=100,
+                currency="USD",
+                status="PENDING_REVIEW",
+            )
+            profile = VendorBankProfile(
+                vendor_key="tenant test vendor",
+                vendor_name="Tenant Test Vendor",
+                bank_name="Test Bank",
+                account_last4="1234",
+                account_fingerprint="test-fingerprint",
+            )
+            audit = AuditLog(action="tenant_test")
+            session.add_all([job, payment, profile, audit])
+            session.commit()
+
+            assert job.company_id is None
+            assert payment.company_id is None
+            assert profile.company_id is None
+            assert audit.company_id is None
