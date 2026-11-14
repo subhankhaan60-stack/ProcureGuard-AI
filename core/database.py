@@ -1012,6 +1012,7 @@ class Database:
         bank_account_fingerprint: Optional[str] = None,
         source: str = "MANUAL",
         created_by_user_id: Optional[int] = None,
+        company_id: Optional[int] = None,
     ) -> dict:
         """
         Record payment data for review. This does not execute or authorize payment.
@@ -1057,6 +1058,10 @@ class Database:
                 if invoice_result_id <= 0:
                     raise ValueError("invoice_result_id must be a positive integer.")
                 linked_result = session.get(Result, invoice_result_id)
+                if linked_result is not None and company_id is not None:
+                    linked_job = session.get(Job, linked_result.job_id)
+                    if linked_job is None or linked_job.company_id != company_id:
+                        linked_result = None
                 if linked_result is None:
                     raise ValueError("Linked invoice result was not found.")
                 if (linked_result.vendor_name or "").strip().casefold() != name.casefold():
@@ -1067,6 +1072,7 @@ class Database:
                     invoice_ref = linked_result.invoice_number
 
             payment = Payment(
+                company_id=company_id,
                 vendor_name=name,
                 invoice_number=invoice_ref,
                 invoice_result_id=invoice_result_id,
@@ -1090,6 +1096,7 @@ class Database:
                 "source": source_value,
                 "status": "PENDING_REVIEW",
                 "created_by_user_id": created_by_user_id,
+                "company_id": company_id,
                 "bank_fingerprint_supplied": fingerprint is not None,
                 "payment_authorized": False,
             })
@@ -1101,6 +1108,7 @@ class Database:
     def _payment_dict(payment: Payment) -> dict:
         return {
             "id": payment.id,
+            "company_id": payment.company_id,
             "vendor_name": payment.vendor_name,
             "invoice_number": payment.invoice_number,
             "invoice_result_id": payment.invoice_result_id,
@@ -1119,12 +1127,20 @@ class Database:
         vendor_name: Optional[str] = None,
         status: Optional[str] = None,
         limit: int = 50,
+        company_id: Optional[int] = None,
     ) -> list[dict]:
         """List recorded payment data; does not imply payment execution."""
         if not 1 <= limit <= 500:
             raise ValueError("limit must be between 1 and 500.")
         with self.session() as session:
             query = session.query(Payment)
+            if company_id is not None:
+                query = query.filter(Payment.company_id == company_id)
+            if company_id is not None:
+                query = query.filter(
+                    Payment.company_id == company_id,
+                    VendorBankProfile.company_id == company_id,
+                )
             if vendor_name and vendor_name.strip():
                 query = query.filter(
                     func.upper(func.trim(Payment.vendor_name)) == vendor_name.strip().upper()
@@ -1144,6 +1160,7 @@ class Database:
         reviewer_reference: str,
         note: str,
         reviewer_user_id: Optional[int] = None,
+        company_id: Optional[int] = None,
     ) -> dict:
         """
         Record a review disposition. This is not a bank instruction or transfer.
@@ -1167,6 +1184,8 @@ class Database:
         with self.session() as session:
             session.connection().exec_driver_sql("BEGIN IMMEDIATE")
             payment = session.get(Payment, payment_id)
+            if payment is not None and company_id is not None and payment.company_id != company_id:
+                payment = None
             if payment is None:
                 raise ValueError("Payment record was not found.")
             if payment.status != "PENDING_REVIEW":
@@ -1210,11 +1229,12 @@ class Database:
                 "payment_execution_authorized": False,
             }
 
-    def list_payment_review_events(self, payment_id: int) -> list[dict]:
+    def list_payment_review_events(self, payment_id: int, company_id: Optional[int] = None) -> list[dict]:
         if payment_id <= 0:
             raise ValueError("payment_id must be a positive integer.")
         with self.session() as session:
-            if session.get(Payment, payment_id) is None:
+            payment = session.get(Payment, payment_id)
+            if payment is None or (company_id is not None and payment.company_id != company_id):
                 raise ValueError("Payment record was not found.")
             events = session.query(PaymentReviewEvent).filter(
                 PaymentReviewEvent.payment_id == payment_id
@@ -1232,6 +1252,7 @@ class Database:
         self,
         vendor_name: Optional[str] = None,
         limit: int = 100,
+        company_id: Optional[int] = None,
     ) -> list[dict]:
         """
         Flag recorded payment entries whose supplied keyed bank fingerprint
