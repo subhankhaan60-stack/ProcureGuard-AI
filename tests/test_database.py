@@ -1129,3 +1129,50 @@ class TestBusinessRecordTenantColumns:
             assert payment.company_id is None
             assert profile.company_id is None
             assert audit.company_id is None
+
+
+class TestPaymentTenantIsolation:
+    def test_payment_list_is_limited_to_requested_company(self, db):
+        first = db.create_company("First Tenant", "first-tenant")
+        second = db.create_company("Second Tenant", "second-tenant")
+        db.create_payment_record(
+            vendor_name="Shared Vendor",
+            amount="100.00",
+            currency="USD",
+            payment_reference="PAY-FIRST",
+            company_id=first["id"],
+        )
+        db.create_payment_record(
+            vendor_name="Shared Vendor",
+            amount="200.00",
+            currency="USD",
+            payment_reference="PAY-SECOND",
+            company_id=second["id"],
+        )
+
+        first_records = db.list_payment_records(company_id=first["id"])
+        second_records = db.list_payment_records(company_id=second["id"])
+
+        assert [record["payment_reference"] for record in first_records] == ["PAY-FIRST"]
+        assert [record["payment_reference"] for record in second_records] == ["PAY-SECOND"]
+
+    def test_company_cannot_review_another_company_payment(self, db):
+        first = db.create_company("First Review Tenant", "first-review-tenant")
+        second = db.create_company("Second Review Tenant", "second-review-tenant")
+        payment = db.create_payment_record(
+            vendor_name="Shared Vendor",
+            amount="100.00",
+            currency="USD",
+            company_id=second["id"],
+        )
+
+        with pytest.raises(ValueError, match="Payment record was not found"):
+            db.review_payment_record(
+                payment_id=payment["id"],
+                decision="CLEAR",
+                reviewer_reference="reviewer@example.com",
+                note="Cross-tenant access test.",
+                company_id=first["id"],
+            )
+
+        assert db.list_payment_records(company_id=second["id"])[0]["status"] == "PENDING_REVIEW"
