@@ -765,21 +765,24 @@ def get_payment_review_queue(
     vendor_name: str | None = Query(None, min_length=1, max_length=255),
     limit: int = Query(100, ge=1, le=500),
     db: Database = Depends(get_database),
-    user: dict = Depends(require_roles("ADMIN", "REVIEWER", "APPROVER", "AUDITOR")),
+    user: dict = Depends(require_company_roles("ADMIN", "REVIEWER", "APPROVER", "AUDITOR")),
 ):
     try:
         pending = db.list_payment_records(
             vendor_name=vendor_name,
             status="PENDING_REVIEW",
             limit=limit,
+            company_id=user["company_id"],
         )
         duplicate_findings = db.find_duplicate_payment_candidates(
             vendor_name=vendor_name,
             limit=limit,
+            company_id=user["company_id"],
         )
         bank_findings = db.find_payment_bank_profile_mismatches(
             vendor_name=vendor_name,
             limit=limit,
+            company_id=user["company_id"],
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
