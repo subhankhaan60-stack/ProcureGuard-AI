@@ -1136,11 +1136,6 @@ class Database:
             query = session.query(Payment)
             if company_id is not None:
                 query = query.filter(Payment.company_id == company_id)
-            if company_id is not None:
-                query = query.filter(
-                    Payment.company_id == company_id,
-                    VendorBankProfile.company_id == company_id,
-                )
             if vendor_name and vendor_name.strip():
                 query = query.filter(
                     func.upper(func.trim(Payment.vendor_name)) == vendor_name.strip().upper()
@@ -1273,6 +1268,11 @@ class Database:
                 Payment.bank_account_fingerprint.isnot(None),
                 Payment.bank_account_fingerprint != "",
             )
+            if company_id is not None:
+                query = query.filter(
+                    Payment.company_id == company_id,
+                    VendorBankProfile.company_id == company_id,
+                )
             if vendor_name and vendor_name.strip():
                 query = query.filter(
                     func.upper(func.trim(Payment.vendor_name))
