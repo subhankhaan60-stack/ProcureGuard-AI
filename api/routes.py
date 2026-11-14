@@ -50,6 +50,8 @@ from .dependencies import (
     require_api_key,
     get_current_user,
     require_roles,
+    require_company_user,
+    require_company_roles,
 )
 from .schemas import (
     BatchErrorDetail,
@@ -666,12 +668,13 @@ def get_authenticated_profile(user: dict = Depends(get_current_user)):
 def create_payment(
     payload: PaymentCreateRequest,
     db: Database = Depends(get_database),
-    user: dict = Depends(require_roles("ADMIN", "PREPARER")),
+    user: dict = Depends(require_company_roles("ADMIN", "PREPARER")),
 ):
     try:
         return db.create_payment_record(
             **payload.model_dump(),
             created_by_user_id=user["id"],
+            company_id=user["company_id"],
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -688,13 +691,14 @@ def list_payments(
     status: str | None = Query(None),
     limit: int = Query(50, ge=1, le=500),
     db: Database = Depends(get_database),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_company_user),
 ):
     try:
         return db.list_payment_records(
             vendor_name=vendor_name,
             status=status,
             limit=limit,
+            company_id=user["company_id"],
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -712,7 +716,7 @@ def review_payment(
     payment_id: int,
     payload: PaymentReviewRequest,
     db: Database = Depends(get_database),
-    user: dict = Depends(require_roles("ADMIN", "REVIEWER", "APPROVER")),
+    user: dict = Depends(require_company_roles("ADMIN", "REVIEWER", "APPROVER")),
 ):
     try:
         return db.review_payment_record(
@@ -721,6 +725,7 @@ def review_payment(
             reviewer_reference=user["email"],
             note=payload.note,
             reviewer_user_id=user["id"],
+            company_id=user["company_id"],
         )
     except ValueError as exc:
         message = str(exc)
@@ -739,10 +744,10 @@ def review_payment(
 def list_payment_reviews(
     payment_id: int,
     db: Database = Depends(get_database),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_company_user),
 ):
     try:
-        return db.list_payment_review_events(payment_id)
+        return db.list_payment_review_events(payment_id, company_id=user["company_id"])
     except ValueError as exc:
         status_code = 404 if "not found" in str(exc).lower() else 422
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
@@ -829,11 +834,13 @@ def get_payment_bank_mismatches(
     vendor_name: str | None = Query(None, min_length=1, max_length=255),
     limit: int = Query(100, ge=1, le=500),
     db: Database = Depends(get_database),
+    user: dict = Depends(require_company_roles("ADMIN", "REVIEWER", "APPROVER", "AUDITOR")),
 ):
     try:
         findings = db.find_payment_bank_profile_mismatches(
             vendor_name=vendor_name,
             limit=limit,
+            company_id=user["company_id"],
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -859,11 +866,13 @@ def get_payment_duplicate_candidates(
     vendor_name: str | None = Query(None, min_length=1, max_length=255),
     limit: int = Query(100, ge=1, le=500),
     db: Database = Depends(get_database),
+    user: dict = Depends(require_company_roles("ADMIN", "REVIEWER", "APPROVER", "AUDITOR")),
 ):
     try:
         findings = db.find_duplicate_payment_candidates(
             vendor_name=vendor_name,
             limit=limit,
+            company_id=user["company_id"],
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
