@@ -71,6 +71,7 @@ class Job(Base):
     __tablename__ = "jobs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=True, index=True)
     type = Column(String(50), nullable=False)
     status = Column(String(20), nullable=False, default="PENDING")
     file_name = Column(String(255), nullable=True)
@@ -167,7 +168,8 @@ class VendorBankProfile(Base):
     __tablename__ = "vendor_bank_profiles"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    vendor_key = Column(String(255), nullable=False, unique=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=True, index=True)
+    vendor_key = Column(String(255), nullable=False, index=True)
     vendor_name = Column(String(255), nullable=False)
     bank_name = Column(String(255), nullable=False)
     account_last4 = Column(String(4), nullable=False)
@@ -181,6 +183,7 @@ class Payment(Base):
     __tablename__ = "payments"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=True, index=True)
     vendor_name = Column(String(255), nullable=False, index=True)
     invoice_number = Column(String(100), nullable=True, index=True)
     invoice_result_id = Column(Integer, ForeignKey("results.id"), nullable=True, index=True)
@@ -214,6 +217,7 @@ class AuditLog(Base):
     __tablename__ = "audit_log"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=True, index=True)
     action = Column(String(100), nullable=False)
     entity_type = Column(String(50), nullable=True)  # contract, po, invoice, job
     entity_id = Column(String(100), nullable=True)
@@ -283,6 +287,22 @@ class Database:
             if "parent_job_id" not in columns:
                 connection.exec_driver_sql("ALTER TABLE jobs ADD COLUMN parent_job_id INTEGER REFERENCES jobs(id)")
                 connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_jobs_parent_job_id ON jobs(parent_job_id)")
+
+            # Backward-compatible tenant ownership for business records.
+            # Existing rows remain NULL until an administrator verifies ownership.
+            for table_name in ("jobs", "vendor_bank_profiles", "payments", "audit_log"):
+                columns = {
+                    row[1] for row in connection.exec_driver_sql(
+                        f"PRAGMA table_info({table_name})"
+                    ).fetchall()
+                }
+                if "company_id" not in columns:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {table_name} ADD COLUMN company_id INTEGER REFERENCES companies(id)"
+                    )
+                    connection.exec_driver_sql(
+                        f"CREATE INDEX IF NOT EXISTS ix_{table_name}_company_id ON {table_name}(company_id)"
+                    )
 
             # Backward-compatible tenant ownership for user identities.
             user_columns = {
